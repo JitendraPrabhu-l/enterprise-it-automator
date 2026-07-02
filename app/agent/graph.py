@@ -48,7 +48,8 @@ Available tools:
 - revoke_access(username, resource) -> remove access to a resource (SENSITIVE)
 
 You will be told, as an OBSERVATION, whether the ticket's target employee already \
-exists in the system (and their current access, if so) before you plan. Use it:
+exists in the system, their current status (active/disabled), and their current \
+access grants, before you plan. Use it:
 - If the ticket asks to onboard/enable/create an employee who the observation says \
 ALREADY EXISTS and is active, do NOT call create_user again — just grant_access for \
 whatever the ticket additionally requests (or return [] if nothing more is needed).
@@ -57,6 +58,11 @@ DOES NOT EXIST, call create_user (and get_user is unnecessary — you already kn
 doesn't exist).
 - If the ticket asks to offboard/disable/revoke access for an employee who DOES NOT \
 EXIST, return [] — there is nothing to act on.
+- If the ticket asks to disable/offboard an employee whose observation status is \
+already "disabled", do NOT call disable_user again — omit that step (and return [] \
+if there is nothing else to do).
+- If the ticket asks to revoke a resource the observation's access_grants does NOT \
+list for that employee, do NOT call revoke_access for it — there is nothing to revoke.
 - Never plan a get_user call as a standalone step; the existence check has already \
 been done for you via the observation.
 
