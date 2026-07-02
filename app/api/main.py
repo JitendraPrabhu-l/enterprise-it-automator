@@ -12,12 +12,13 @@ from app.api.schemas import (
     ApprovalDecision,
     ApprovalOut,
     AuditLogOut,
+    EmployeeOut,
     RunResult,
     TicketCreate,
     TicketOut,
 )
 from app.config import get_settings
-from app.db.models import Approval, ApprovalStatus, AuditLog, Ticket, TicketStatus
+from app.db.models import Approval, ApprovalStatus, AuditLog, EmployeeUser, Ticket, TicketStatus, UserStatus
 from app.db.session import init_db, session_scope
 
 logging.basicConfig(level=logging.INFO)
@@ -98,6 +99,22 @@ async def get_ticket(ticket_id: int) -> Ticket:
         if ticket is None:
             raise HTTPException(404, f"No such ticket: {ticket_id}")
         return ticket
+
+
+@app.get(
+    "/employees", response_model=list[EmployeeOut], dependencies=[Depends(require_api_key)]
+)
+async def list_employees(status: str | None = None) -> list[EmployeeUser]:
+    """Current (active) and past (disabled) employees in the mock identity store."""
+    async with session_scope() as session:
+        query = select(EmployeeUser).order_by(EmployeeUser.full_name)
+        if status:
+            try:
+                query = query.where(EmployeeUser.status == UserStatus(status))
+            except ValueError:
+                raise HTTPException(400, f"Invalid status: {status!r}")
+        rows = await session.scalars(query)
+        return list(rows)
 
 
 @app.get(
