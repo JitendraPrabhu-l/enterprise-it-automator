@@ -1,5 +1,6 @@
 mcp>=1.2.0
 langgraph>=0.2.60
+langgraph-checkpoint-sqlite>=2.0.0
 langchain-core>=0.3.28
 langchain-groq>=0.2.3
 langchain-anthropic>=0.3.3
