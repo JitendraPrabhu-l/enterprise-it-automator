@@ -22,6 +22,20 @@ class TicketOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class EmployeeOut(BaseModel):
+    id: int
+    username: str
+    full_name: str
+    email: str
+    department: str
+    status: str
+    access_grants: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class ApprovalOut(BaseModel):
     id: int
     ticket_id: int
