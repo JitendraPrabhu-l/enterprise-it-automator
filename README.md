@@ -20,7 +20,12 @@ tickets by reasoning over a custom **Model Context Protocol (MCP)** server, with
 - **`app/mcp_server/`** — a real MCP server (built on the official `mcp` Python SDK)
   exposing IT-provisioning tools (`get_user`, `create_user`, `grant_access`,
   `disable_user`, `revoke_access`) over JSON-RPC, on either of two transports
-  (see **MCP transport: local vs. remote** below). Sensitive tools
+  (see **MCP transport: local vs. remote** below). `create_user` auto-grants
+  a default access bundle based on the employee's `department`
+  (`DEPARTMENT_ACCESS_DEFAULTS` in `tools.py` — e.g. Engineering gets
+  `vpn`, `github:engineering`, `jira:core-platform`; IT additionally gets
+  `admin-panel`; unmapped departments get `vpn` only), so onboarding tickets
+  don't need to spell out every resource. Sensitive tools
   (`disable_user`, `revoke_access`) require a server-verified `approval_id` —
   the server itself refuses the call if no human has approved that *exact*
   tool + arguments combination (`approval_gate.py`). This is a real security
@@ -48,8 +53,10 @@ tickets by reasoning over a custom **Model Context Protocol (MCP)** server, with
   of these (except `/health` and the static UI page) require an `X-API-Key`
   header matching `API_KEY` in `.env` — see **Auth** below.
 - **`app/db/`** — SQLAlchemy models: `EmployeeUser` (mock IBM ID Management
-  record), `Ticket`, `Approval`, `AuditLog`. SQLite by default (zero setup);
-  swap `DATABASE_URL` for Postgres in production.
+  record), `Ticket`, `Approval`, `AuditLog`. SQLite by default (zero setup) —
+  both the app DB and the LangGraph checkpoint DB live under `data/` (created
+  automatically on first run if missing); swap `DATABASE_URL` for Postgres in
+  production.
 - **MCP server architecture**: a real server built from scratch, registered
   and driven by an external client over either of two transports — the same
   local (stdio) or remote (streamable-HTTP) integration paths an orchestrator
@@ -107,6 +114,11 @@ JSON endpoints.
 The UI is a single static page (`app/static/index.html`, vanilla HTML/CSS/JS,
 no build step) served directly by the FastAPI app — polls `/tickets`,
 `/approvals?status=pending`, and `/employees` every 8s and on every action.
+
+The "Clear" button on the Tickets panel hides tickets from that browser's
+view only — it does not delete anything server-side. Hidden ticket IDs are
+tracked in `localStorage`; "Show cleared (N)" toggles them back into view,
+and each cleared ticket has a "Restore" action while shown.
 
 ### MCP transport: local vs. remote
 
@@ -198,14 +210,16 @@ curl http://127.0.0.1:8000/tickets/1/audit -H "X-API-Key: $API_KEY"
 pytest -v
 ```
 
-49 tests covering: tool CRUD + audit logging (including idempotency rejection
-for disabling an already-disabled user / revoking an ungranted resource), the
-approval-gate security boundary (tool/argument mismatch rejection, replay
-prevention, unknown/pending/rejected approval refusal), the graph's
-routing/guardrail logic, the API-key auth dependency, employee status
-filtering (current vs. past), MCP transport config selection, a live
-streamable-HTTP round trip against a real (ephemeral) MCP server, and
-LLM-provider selection/error handling.
+62 tests covering: tool CRUD + audit logging (including idempotency rejection
+for disabling an already-disabled user / revoking an ungranted resource, and
+department-based default access grants on create), the approval-gate security
+boundary (tool/argument mismatch rejection, replay prevention,
+unknown/pending/rejected approval refusal), the graph's routing/guardrail
+logic and human-readable result summaries, the API-key auth dependency,
+employee status filtering (current vs. past), MCP transport config selection,
+a live streamable-HTTP round trip against a real (ephemeral) MCP server,
+LLM-provider selection/error handling, and auto-creation of `data/` on a
+fresh checkout with no existing DB files.
 
 ## Notes on model choice
 
