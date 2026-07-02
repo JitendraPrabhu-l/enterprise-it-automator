@@ -19,11 +19,14 @@ tickets by reasoning over a custom **Model Context Protocol (MCP)** server, with
 
 - **`app/mcp_server/`** — a real MCP server (built on the official `mcp` Python SDK)
   exposing IT-provisioning tools (`get_user`, `create_user`, `grant_access`,
-  `disable_user`, `revoke_access`) over stdio JSON-RPC. Sensitive tools
+  `disable_user`, `revoke_access`) over JSON-RPC, on either of two transports
+  (see **MCP transport: local vs. remote** below). Sensitive tools
   (`disable_user`, `revoke_access`) require a server-verified `approval_id` —
   the server itself refuses the call if no human has approved that *exact*
   tool + arguments combination (`approval_gate.py`). This is a real security
-  boundary, not a prompt-level suggestion the LLM could talk its way past.
+  boundary, not a prompt-level suggestion the LLM could talk its way past, and
+  it is enforced identically regardless of which transport the client used to
+  reach the server.
 - **`app/agent/`** — a [LangGraph](https://langchain-ai.github.io/langgraph/) DAG:
   `plan → route → execute_step → route → ... → finalize`, with a dedicated
   `await_approval` node that uses LangGraph's `interrupt()` to pause the whole
@@ -31,22 +34,26 @@ tickets by reasoning over a custom **Model Context Protocol (MCP)** server, with
   unapproved. A separate HTTP request resumes it later — this models a
   realistic multi-hour approval turnaround, not just a synchronous callback.
 
-  - `llm.py` is a pluggable adapter — `LLM_PROVIDER=groq|anthropic|watsonx`
-    swaps the backend with no code changes, so the same graph can run on a
-    free Groq key today and point at IBM Granite via watsonx later.
+  - `llm.py` is a pluggable adapter —
+    `LLM_PROVIDER=groq|anthropic|watsonx|openrouter` swaps the backend with
+    no code changes, so the same graph can run on a free Groq key today and
+    point at IBM Granite via watsonx (or a credential-free OpenRouter free
+    model, if watsonx provisioning is blocked) later.
   - The planner enforces a **structural JSON guardrail**: `_extract_json_array`
     strips markdown fences/prose and raises a clear error (routed to a
     `FAILED` ticket state, not a crash) if the model doesn't return valid JSON.
 - **`app/api/`** — FastAPI endpoints to submit tickets, list/inspect them,
-  list/decide pending approvals, and pull the per-ticket audit trail. All of
-  these (except `/health` and the static UI page) require an `X-API-Key`
+  list/decide pending approvals, pull the per-ticket audit trail, and list
+  current/past employees (`GET /employees`, `?status=active|disabled`). All
+  of these (except `/health` and the static UI page) require an `X-API-Key`
   header matching `API_KEY` in `.env` — see **Auth** below.
 - **`app/db/`** — SQLAlchemy models: `EmployeeUser` (mock IBM ID Management
   record), `Ticket`, `Approval`, `AuditLog`. SQLite by default (zero setup);
   swap `DATABASE_URL` for Postgres in production.
 - **MCP server architecture**: a real server built from scratch, registered
-  and driven by an external client over the same stdio transport an
-  orchestrator (watsonx Orchestrate) would use.
+  and driven by an external client over either of two transports — the same
+  local (stdio) or remote (streamable-HTTP) integration paths an orchestrator
+  like watsonx Orchestrate supports when registering an MCP tool server.
 - **Security or enterprise auth flow**: sensitive tool calls require a
   pre-issued, single-use approval token verified server-side against tool
   name *and* arguments — prevents replay/reuse across different actions.
@@ -93,14 +100,31 @@ python -m uvicorn app.api.main:app --reload
 ```
 
 Open `http://127.0.0.1:8000/` for the minimal web UI (submit tickets, approve/reject
-pending sensitive actions, inspect the audit log), or `http://127.0.0.1:8000/docs`
-for the interactive Swagger UI. Both talk to the same JSON endpoints.
+pending sensitive actions, browse current/past employees, inspect the audit log), or
+`http://127.0.0.1:8000/docs` for the interactive Swagger UI. Both talk to the same
+JSON endpoints.
 
 The UI is a single static page (`app/static/index.html`, vanilla HTML/CSS/JS,
-no build step) served directly by the FastAPI app — polls `/tickets` and
-`/approvals?status=pending` every 8s and on every action.
+no build step) served directly by the FastAPI app — polls `/tickets`,
+`/approvals?status=pending`, and `/employees` every 8s and on every action.
 
-### Run the MCP server standalone (for inspection / debugging)
+### MCP transport: local vs. remote
+
+The MCP server (`app/mcp_server/server.py`) supports two transports, controlled
+by `MCP_TRANSPORT` in `.env` (or `--transport` on the CLI) — same tools, same
+`approval_gate` enforcement, either way:
+
+- **`stdio` (default, local)** — the agent process spawns the MCP server as a
+  subprocess and talks to it over a stdio pipe. Zero config, nothing to run
+  separately; this is what `app/agent/mcp_client.py` does out of the box.
+- **`http` (remote)** — the MCP server runs standalone as its own long-lived
+  process, listening on `MCP_SERVER_HOST:MCP_SERVER_PORT` and speaking MCP
+  over streamable-HTTP. This is what a real deployment or an orchestrator
+  such as watsonx Orchestrate means by registering a "remote MCP server":
+  the server is a separate service reachable by URL, not something the
+  caller launches itself.
+
+Run the server standalone for inspection/debugging (stdio, the default):
 
 ```bash
 python -m app.mcp_server.server
@@ -108,6 +132,26 @@ python -m app.mcp_server.server
 
 Speaks MCP JSON-RPC over stdio — connect with any MCP-compatible client or
 the [MCP Inspector](https://github.com/modelcontextprotocol/inspector).
+
+Run it as a standalone remote server over HTTP instead:
+
+```bash
+python -m app.mcp_server.server --transport http
+# or: set MCP_TRANSPORT=http in .env and run with no flag
+```
+
+To point the agent at that remote server instead of spawning its own local
+subprocess, set in `.env`:
+
+```
+MCP_TRANSPORT=http
+MCP_SERVER_URL=http://127.0.0.1:8765/mcp
+```
+
+`app/agent/mcp_client.py` reads the same `MCP_TRANSPORT` setting and connects
+over streamable-HTTP to `MCP_SERVER_URL` instead of spawning a subprocess —
+the agent and the MCP server can then run as fully separate processes,
+potentially on separate hosts.
 
 ## Example flow
 
@@ -154,15 +198,39 @@ curl http://127.0.0.1:8000/tickets/1/audit -H "X-API-Key: $API_KEY"
 pytest -v
 ```
 
-37 tests covering: tool CRUD + audit logging, the approval-gate security
-boundary (tool/argument mismatch rejection, replay prevention, unknown/pending/
-rejected approval refusal), the graph's routing/guardrail logic, and the
-API-key auth dependency.
+49 tests covering: tool CRUD + audit logging (including idempotency rejection
+for disabling an already-disabled user / revoking an ungranted resource), the
+approval-gate security boundary (tool/argument mismatch rejection, replay
+prevention, unknown/pending/rejected approval refusal), the graph's
+routing/guardrail logic, the API-key auth dependency, employee status
+filtering (current vs. past), MCP transport config selection, a live
+streamable-HTTP round trip against a real (ephemeral) MCP server, and
+LLM-provider selection/error handling.
 
 ## Notes on model choice
 
 Default is Groq's `llama-3.1-8b-instant` (free tier, fast, broadly available).
 `llama-3.3-70b-versatile` is often blocked at the org level on free Groq
 accounts — swap `GROQ_MODEL` in `.env` if you have access to a larger model.
-To point at Anthropic or watsonx instead, set `LLM_PROVIDER` accordingly and
-fill in the matching credentials in `.env` — no code changes required.
+To point at Anthropic, watsonx, or OpenRouter instead, set `LLM_PROVIDER`
+accordingly and fill in the matching credentials in `.env` — no code changes
+required.
+
+`langchain-ibm` (and its `ibm-watsonx-ai` dependency) is a first-class,
+always-installed dependency, not an optional extra — `LLM_PROVIDER=watsonx`
+is ready to run today against IBM Granite (or any other model deployed on
+your watsonx.ai project) once you supply real `WATSONX_API_KEY` and
+`WATSONX_PROJECT_ID` values in `.env`. Note that `ChatWatsonx` authenticates
+against IBM Cloud IAM eagerly at construction time (not lazily on first
+call), so `get_llm()` will raise immediately on startup if the credentials
+are invalid rather than failing on the first request.
+
+**`LLM_PROVIDER=openrouter`** is a credential-free fallback for watsonx:
+provisioning a watsonx.ai project on IBM Cloud's Lite plan currently requires
+a credit card on file even though usage stays within the free tier, which
+blocks access until that's set up. [OpenRouter](https://openrouter.ai/keys)
+needs only an API key (no card) and exposes several free-tier models
+(default: `meta-llama/llama-3.3-70b-instruct:free`) through an
+OpenAI-compatible API — `_build_openrouter` in `app/agent/llm.py` reuses
+`ChatOpenAI` pointed at OpenRouter's `base_url` rather than adding a new
+SDK dependency.
