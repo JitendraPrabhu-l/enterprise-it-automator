@@ -102,6 +102,8 @@ async def disable_user(
 ) -> dict:
     """Sensitive action — must only be invoked after HITL approval."""
     user = await _get_user(session, username)
+    if user.status == UserStatus.DISABLED:
+        raise ToolError(f"User {username!r} is already disabled")
     user.status = UserStatus.DISABLED
     await _audit(
         session, actor, "disable_user", {"username": username},
@@ -136,6 +138,8 @@ async def revoke_access(
 ) -> dict:
     """Sensitive action — must only be invoked after HITL approval."""
     user = await _get_user(session, username)
+    if resource not in user.access_grants:
+        raise ToolError(f"User {username!r} does not have access to {resource!r}")
     user.access_grants = [g for g in user.access_grants if g != resource]
     await _audit(
         session, actor, "revoke_access", {"username": username, "resource": resource},
