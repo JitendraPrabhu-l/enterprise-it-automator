@@ -8,10 +8,29 @@ async def test_create_and_get_user(session):
     created = await t.create_user(session, "asmith", "Alice Smith", "asmith@example.com", "Engineering")
     assert created["username"] == "asmith"
     assert created["status"] == "active"
+    assert created["access_grants"] == ["vpn", "github:engineering", "jira:core-platform"]
 
     fetched = await t.get_user(session, "asmith")
     assert fetched["full_name"] == "Alice Smith"
-    assert fetched["access_grants"] == []
+    assert fetched["access_grants"] == ["vpn", "github:engineering", "jira:core-platform"]
+
+
+async def test_create_user_grants_department_defaults(session):
+    sales = await t.create_user(session, "rjones", "Raj Jones", "r@example.com", "Sales")
+    assert sales["access_grants"] == ["vpn", "salesforce"]
+
+    it_user = await t.create_user(session, "iuser", "IT User", "i@example.com", "IT")
+    assert it_user["access_grants"] == ["vpn", "github:engineering", "admin-panel"]
+
+
+async def test_create_user_unknown_department_gets_vpn_only(session):
+    created = await t.create_user(session, "nuser", "New User", "n@example.com", "Marketing")
+    assert created["access_grants"] == ["vpn"]
+
+
+async def test_create_user_no_department_gets_vpn_only(session):
+    created = await t.create_user(session, "nouser", "No Dept", "n2@example.com")
+    assert created["access_grants"] == ["vpn"]
 
 
 async def test_create_user_duplicate_rejected(session):
@@ -26,16 +45,16 @@ async def test_get_user_not_found(session):
 
 
 async def test_grant_and_revoke_access(session):
-    await t.create_user(session, "bwayne", "Bruce Wayne", "b@example.com")
+    await t.create_user(session, "bwayne", "Bruce Wayne", "b@example.com")  # no department -> ["vpn"]
 
     granted = await t.grant_access(session, "bwayne", "github:engineering")
-    assert granted["access_grants"] == ["github:engineering"]
+    assert granted["access_grants"] == ["vpn", "github:engineering"]
 
     granted_again = await t.grant_access(session, "bwayne", "github:engineering")
-    assert granted_again["access_grants"] == ["github:engineering"], "must not duplicate grants"
+    assert granted_again["access_grants"] == ["vpn", "github:engineering"], "must not duplicate grants"
 
     revoked = await t.revoke_access(session, "bwayne", "github:engineering")
-    assert revoked["access_grants"] == []
+    assert revoked["access_grants"] == ["vpn"]
 
 
 async def test_disable_user(session):

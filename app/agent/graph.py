@@ -42,8 +42,14 @@ of tool calls.
 
 Available tools:
 - get_user(username) -> look up an employee record
-- create_user(username, full_name, email, department) -> onboard a new employee
-- grant_access(username, resource) -> grant access to a resource (e.g. "github:engineering", "vpn", "jira:core-platform")
+- create_user(username, full_name, email, department) -> onboard a new employee.
+  This AUTOMATICALLY grants a default access bundle for the employee's department
+  (e.g. Engineering gets vpn + github:engineering + jira:core-platform; Sales gets
+  vpn + salesforce; IT gets vpn + github:engineering + admin-panel). Do NOT plan a
+  separate grant_access call for anything already covered by the department default
+  — only plan grant_access for resources the ticket explicitly asks for that go
+  beyond the department default (e.g. a specific one-off tool or repo).
+- grant_access(username, resource) -> grant access to a resource (e.g. "github:engineering", "vpn", "jira:core-platform", "admin-panel")
 - disable_user(username) -> deactivate an employee's account (SENSITIVE)
 - revoke_access(username, resource) -> remove access to a resource (SENSITIVE)
 
@@ -267,6 +273,34 @@ async def execute_step_node(state: AgentState) -> dict:
     }
 
 
+def _describe_result(tool: str, args: dict, raw_result: str) -> str:
+    """Human-readable one-liner for a successful step, used in the ticket
+    summary shown in the UI — avoids dumping the tool's raw JSON response,
+    which reads as a confusing/blank-looking blob to a non-technical viewer.
+    """
+    try:
+        parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+    except (TypeError, ValueError):
+        parsed = None
+
+    username = (parsed or {}).get("username") if isinstance(parsed, dict) else None
+    username = username or args.get("username", "")
+
+    if tool == "create_user":
+        grants = (parsed or {}).get("access_grants") or []
+        access_note = f" with access to {', '.join(grants)}" if grants else ""
+        return f"Created account for {username}{access_note}."
+    if tool == "disable_user":
+        return f"Disabled account for {username}."
+    if tool == "grant_access":
+        return f"Granted {args.get('resource', '?')} access to {username}."
+    if tool == "revoke_access":
+        return f"Revoked {args.get('resource', '?')} access from {username}."
+    if tool == "get_user":
+        return f"Looked up {username}."
+    return f"{tool} completed for {username}." if username else f"{tool} completed."
+
+
 async def finalize_node(state: AgentState) -> dict:
     from app.db.models import Ticket, TicketStatus
 
@@ -285,7 +319,9 @@ async def finalize_node(state: AgentState) -> dict:
         summary = "No actions were required for this ticket."
     else:
         status = TicketStatus.COMPLETED
-        summary = "; ".join(f"{r['tool']} -> {r['result']}" for r in results)
+        summary = " ".join(
+            _describe_result(r["tool"], r["args"], r["result"]) for r in results
+        )
 
     async with session_scope() as session:
         ticket = await session.get(Ticket, state["ticket_id"])

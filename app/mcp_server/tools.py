@@ -15,6 +15,19 @@ class ToolError(Exception):
     """Raised for expected, user-facing tool failures (not found, bad state, etc.)."""
 
 
+DEPARTMENT_ACCESS_DEFAULTS: dict[str, list[str]] = {
+    "engineering": ["vpn", "github:engineering", "jira:core-platform"],
+    "sales": ["vpn", "salesforce"],
+    "it": ["vpn", "github:engineering", "admin-panel"],
+    "hr": ["vpn", "workday"],
+    "finance": ["vpn", "netsuite"],
+}
+
+
+def default_access_for_department(department: str) -> list[str]:
+    return list(DEPARTMENT_ACCESS_DEFAULTS.get(department.strip().lower(), ["vpn"]))
+
+
 async def _get_user(session: AsyncSession, username: str) -> EmployeeUser:
     user = await session.scalar(
         select(EmployeeUser).where(EmployeeUser.username == username)
@@ -76,22 +89,24 @@ async def create_user(
     if existing is not None:
         raise ToolError(f"User already exists: {username!r}")
 
+    default_access = default_access_for_department(department)
     user = EmployeeUser(
         username=username,
         full_name=full_name,
         email=email,
         department=department,
         status=UserStatus.ACTIVE,
-        access_grants=[],
+        access_grants=default_access,
     )
     session.add(user)
     await session.flush()
     await _audit(
         session, actor, "create_user",
         {"username": username, "full_name": full_name, "email": email, "department": department},
-        f"created user {username}", True, ticket_id,
+        f"created user {username} with default {department!r} access: {', '.join(default_access)}",
+        True, ticket_id,
     )
-    return {"username": user.username, "status": user.status.value}
+    return {"username": user.username, "status": user.status.value, "access_grants": user.access_grants}
 
 
 async def disable_user(

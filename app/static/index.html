@@ -75,8 +75,16 @@
 <body>
 
 <header>
-  <h1>MCP Enterprise IT Automator</h1>
-  <p>Submit a ticket → agent plans via MCP tools → sensitive actions pause for human approval</p>
+  <div style="display:flex; justify-content:space-between; align-items:flex-end; gap:16px; flex-wrap:wrap;">
+    <div>
+      <h1>MCP Enterprise IT Automator</h1>
+      <p>Submit a ticket → agent plans via MCP tools → sensitive actions pause for human approval</p>
+    </div>
+    <div style="min-width:220px;">
+      <label for="apiKeyInput" style="margin-bottom:4px;">API Key</label>
+      <input id="apiKeyInput" type="password" placeholder="leave blank if none configured" style="margin-bottom:0;" />
+    </div>
+  </div>
 </header>
 
 <main>
@@ -114,7 +122,13 @@
     </section>
 
     <section class="panel">
-      <h2>Tickets</h2>
+      <div class="toolbar">
+        <h2 style="margin:0">Tickets</h2>
+        <div class="row">
+          <button class="link-btn" id="showClearedBtn" onclick="toggleShowCleared()" style="display:none"></button>
+          <button class="secondary" onclick="clearTickets()">Clear</button>
+        </div>
+      </div>
       <div id="tickets"><p class="empty">Loading…</p></div>
     </section>
   </div>
@@ -140,22 +154,19 @@ function escapeHtml(value) {
   }[ch]));
 }
 
-function getApiKey() {
-  let key = localStorage.getItem("apiKey");
-  if (key === null) {
-    key = window.prompt("API key (leave blank if the server has no API_KEY configured):") || "";
-    localStorage.setItem("apiKey", key);
-  }
-  return key;
-}
+const apiKeyInput = document.getElementById("apiKeyInput");
+apiKeyInput.value = localStorage.getItem("apiKey") || "";
+apiKeyInput.addEventListener("input", () => {
+  localStorage.setItem("apiKey", apiKeyInput.value);
+});
 
 async function api(path, opts) {
   const headers = { "Content-Type": "application/json" };
-  const key = getApiKey();
+  const key = apiKeyInput.value;
   if (key) headers["X-API-Key"] = key;
   const res = await fetch(API + path, Object.assign({ headers }, opts || {}));
   if (res.status === 401) {
-    localStorage.removeItem("apiKey");
+    toast("API key missing or invalid — set it in the top-right field.", true);
   }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -284,16 +295,64 @@ async function toggleAudit(ticketId, btn) {
   }
 }
 
+function getHiddenTicketIds() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem("hiddenTicketIds") || "[]"));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function setHiddenTicketIds(ids) {
+  localStorage.setItem("hiddenTicketIds", JSON.stringify([...ids]));
+}
+
+let showCleared = false;
+
+function clearTickets() {
+  const hidden = getHiddenTicketIds();
+  lastLoadedTicketIds.forEach(id => hidden.add(id));
+  setHiddenTicketIds(hidden);
+  showCleared = false;
+  renderTickets();
+}
+
+function toggleShowCleared() {
+  showCleared = !showCleared;
+  renderTickets();
+}
+
+function unclearTicket(ticketId) {
+  const hidden = getHiddenTicketIds();
+  hidden.delete(ticketId);
+  setHiddenTicketIds(hidden);
+  renderTickets();
+}
+
+let lastLoadedTicketIds = [];
+
 async function renderTickets() {
   const el = document.getElementById("tickets");
+  const showClearedBtn = document.getElementById("showClearedBtn");
   try {
-    const tickets = await api("/tickets");
+    const allTickets = await api("/tickets");
+    lastLoadedTicketIds = allTickets.map(t => t.id);
+    const hidden = getHiddenTicketIds();
+    const clearedCount = allTickets.filter(t => hidden.has(t.id)).length;
+
+    showClearedBtn.style.display = clearedCount ? "inline" : "none";
+    showClearedBtn.textContent = showCleared
+      ? "Hide cleared"
+      : `Show cleared (${clearedCount})`;
+
+    const tickets = showCleared ? allTickets : allTickets.filter(t => !hidden.has(t.id));
+
     if (!tickets.length) {
-      el.innerHTML = `<p class="empty">No tickets yet — submit one on the left.</p>`;
+      el.innerHTML = `<p class="empty">${allTickets.length ? "No tickets to show — all cleared." : "No tickets yet — submit one on the left."}</p>`;
       return;
     }
     el.innerHTML = tickets.map(t => `
-      <div class="card">
+      <div class="card" ${hidden.has(t.id) ? 'style="opacity:.55"' : ""}>
         <div class="card-head">
           <strong>#${t.id} · ${escapeHtml(t.subject)}</strong>
           ${badge(t.status)}
@@ -301,7 +360,10 @@ async function renderTickets() {
         <div class="meta">from ${escapeHtml(t.requester)} · ${escapeHtml(t.created_at)}</div>
         <div class="body-text">${escapeHtml(t.body)}</div>
         ${t.result_summary ? `<div class="body-text" style="color:var(--text)"><strong>Result:</strong> ${escapeHtml(t.result_summary)}</div>` : ""}
-        <button class="link-btn" onclick="toggleAudit(${t.id}, this)">Show audit log</button>
+        <div class="row" style="margin-top:6px">
+          <button class="link-btn" onclick="toggleAudit(${t.id}, this)">Show audit log</button>
+          ${hidden.has(t.id) ? `<button class="link-btn" onclick="unclearTicket(${t.id})">Restore</button>` : ""}
+        </div>
         <div id="audit-${t.id}" data-open="0"></div>
       </div>
     `).join("");

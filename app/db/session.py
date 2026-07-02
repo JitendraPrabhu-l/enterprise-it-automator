@@ -1,5 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -10,10 +12,24 @@ _engine = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+def _ensure_sqlite_dir_exists(database_url: str) -> None:
+    """SQLite (via aiosqlite) does not auto-create the parent directory of its
+    file — only the file itself — so a fresh checkout without data/ present
+    would fail on first run with 'unable to open database file'.
+    """
+    if not database_url.startswith("sqlite"):
+        return
+    db_path = urlparse(database_url).path.lstrip("/")
+    if db_path and db_path != ":memory:":
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+
+
 def get_engine():
     global _engine
     if _engine is None:
-        _engine = create_async_engine(get_settings().database_url, echo=False)
+        database_url = get_settings().database_url
+        _ensure_sqlite_dir_exists(database_url)
+        _engine = create_async_engine(database_url, echo=False)
     return _engine
 
 

@@ -5,6 +5,7 @@ a SQLite file rather than kept in memory.
 """
 
 import asyncio
+from pathlib import Path
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
@@ -23,9 +24,9 @@ async def _get_graph():
         return _graph
     async with _init_lock:
         if _graph is None:
-            _checkpointer_cm = AsyncSqliteSaver.from_conn_string(
-                get_settings().checkpoint_db_path
-            )
+            checkpoint_db_path = get_settings().checkpoint_db_path
+            Path(checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
+            _checkpointer_cm = AsyncSqliteSaver.from_conn_string(checkpoint_db_path)
             checkpointer = await _checkpointer_cm.__aenter__()
             _graph = compile_graph(checkpointer=checkpointer)
         return _graph

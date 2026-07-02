@@ -1,4 +1,7 @@
+import json
+
 from app.agent.graph import (
+    _describe_result,
     _extract_json_array,
     _extract_username,
     route_after_plan,
@@ -94,3 +97,38 @@ def test_route_after_step_check_awaits_approval_for_sensitive_tool():
 def test_route_after_step_check_executes_non_sensitive_tool_directly():
     state = {"plan": [{"tool": "grant_access", "args": {"username": "x", "resource": "vpn"}}], "plan_index": 0}
     assert route_after_step_check(state) == "execute_step"
+
+
+def test_describe_result_create_user_lists_access():
+    raw = json.dumps({"username": "tuser", "status": "active", "access_grants": ["vpn", "github:engineering"]})
+    desc = _describe_result("create_user", {"username": "tuser"}, raw)
+    assert desc == "Created account for tuser with access to vpn, github:engineering."
+
+
+def test_describe_result_disable_user():
+    raw = json.dumps({"username": "jsmith", "status": "disabled"})
+    desc = _describe_result("disable_user", {"username": "jsmith"}, raw)
+    assert desc == "Disabled account for jsmith."
+
+
+def test_describe_result_grant_access():
+    raw = json.dumps({"username": "bwayne", "access_grants": ["vpn"]})
+    desc = _describe_result("grant_access", {"username": "bwayne", "resource": "vpn"}, raw)
+    assert desc == "Granted vpn access to bwayne."
+
+
+def test_describe_result_revoke_access():
+    raw = json.dumps({"username": "bwayne", "access_grants": []})
+    desc = _describe_result("revoke_access", {"username": "bwayne", "resource": "vpn"}, raw)
+    assert desc == "Revoked vpn access from bwayne."
+
+
+def test_describe_result_falls_back_on_unparseable_result():
+    desc = _describe_result("get_user", {"username": "jsmith"}, "not json")
+    assert desc == "Looked up jsmith."
+
+
+def test_describe_result_unknown_tool_uses_generic_message():
+    raw = json.dumps({"username": "jsmith"})
+    desc = _describe_result("some_future_tool", {"username": "jsmith"}, raw)
+    assert desc == "some_future_tool completed for jsmith."
