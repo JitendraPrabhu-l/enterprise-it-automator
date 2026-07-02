@@ -1,23 +1,40 @@
-"""Custom MCP server exposing enterprise IT-provisioning tools over stdio.
+"""Custom MCP server exposing enterprise IT-provisioning tools over stdio or HTTP.
 
 Standardizes tool exposure for the agent: every sensitive mutation (disable_user,
 revoke_access) requires a pre-approved `approval_id` minted by the FastAPI HITL
 flow, enforced server-side in approval_gate.require_approval — the LLM cannot
 talk its way past this by claiming an action is authorized.
 
+Same tools, same approval_gate enforcement, two transports:
+- stdio (default): the server is spawned as a subprocess of the agent process,
+  zero config, for local dev (see app/agent/mcp_client.py).
+- streamable-http: the server runs standalone on MCP_SERVER_HOST:MCP_SERVER_PORT,
+  as a genuinely separate/remote process an orchestrator (e.g. watsonx
+  Orchestrate) could register by URL instead of spawning.
+
 Run directly for local stdio testing:
     python -m app.mcp_server.server
-Or launch it as a subprocess via an MCP client (see app/agent/mcp_client.py).
+Run as a standalone remote server over HTTP:
+    python -m app.mcp_server.server --transport http
+Or set MCP_TRANSPORT=http in .env to change the default for both `main()` above
+and the transport app/agent/mcp_client.py connects with.
 """
 
 from mcp.server.fastmcp import FastMCP
 
+from app.config import get_settings
 from app.db.session import init_db, session_scope
 from app.mcp_server import tools as t
 from app.mcp_server.approval_gate import require_approval
 from app.mcp_server.tools import ToolError, is_sensitive
 
-mcp = FastMCP("enterprise-it-automator")
+_settings = get_settings()
+
+mcp = FastMCP(
+    "enterprise-it-automator",
+    host=_settings.mcp_server_host,
+    port=_settings.mcp_server_port,
+)
 
 
 @mcp.tool()
@@ -94,10 +111,23 @@ async def _bootstrap() -> None:
 
 
 def main() -> None:
+    import argparse
     import asyncio
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default=_settings.mcp_transport,
+        help="Transport to serve on (default: MCP_TRANSPORT env/config, else stdio).",
+    )
+    args = parser.parse_args()
+
     asyncio.run(_bootstrap())
-    mcp.run(transport="stdio")
+    if args.transport == "http":
+        mcp.run(transport="streamable-http")
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
