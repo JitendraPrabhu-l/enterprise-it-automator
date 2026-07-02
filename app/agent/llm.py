@@ -1,9 +1,17 @@
 """Pluggable LLM adapter.
 
-Swapping backends is a one-line config change (LLM_PROVIDER=groq|anthropic|watsonx)
-rather than a code change, so the same agent graph can be demoed on a free Groq
-key today and pointed at watsonx/Granite or Claude later without touching
-agent/graph.py.
+Swapping backends is a one-line config change
+(LLM_PROVIDER=groq|anthropic|watsonx|openrouter) rather than a code change, so
+the same agent graph can be demoed on a free Groq key today and pointed at
+watsonx/Granite, Claude, or an OpenRouter free-tier model later without
+touching agent/graph.py.
+
+OpenRouter exists as a credential-free fallback: IBM's watsonx.ai Lite plan
+requires a credit card on file to provision a project even though usage
+itself is free, which blocks watsonx access until that's set up. OpenRouter's
+free-tier models need only an API key (no card) and are exposed through an
+OpenAI-compatible API, so ChatOpenAI can talk to them by pointing base_url at
+OpenRouter instead of OpenAI.
 """
 
 from functools import lru_cache
@@ -59,10 +67,28 @@ def _build_watsonx() -> BaseChatModel:
     )
 
 
+def _build_openrouter() -> BaseChatModel:
+    from langchain_openai import ChatOpenAI
+
+    settings = get_settings()
+    if not settings.openrouter_api_key:
+        raise RuntimeError(
+            "LLM_PROVIDER=openrouter but OPENROUTER_API_KEY is not set. "
+            "Get a free key at https://openrouter.ai/keys"
+        )
+    return ChatOpenAI(
+        model=settings.openrouter_model,
+        api_key=settings.openrouter_api_key,
+        base_url=settings.openrouter_base_url,
+        temperature=0,
+    )
+
+
 _BUILDERS = {
     "groq": _build_groq,
     "anthropic": _build_anthropic,
     "watsonx": _build_watsonx,
+    "openrouter": _build_openrouter,
 }
 
 
