@@ -1,14 +1,34 @@
 """Drives the agent graph, persisting interrupted runs so approval can resume
-them later from a separate HTTP request (a different process tick entirely).
+them later from a separate HTTP request (a different process tick entirely) —
+including across an application restart, since the checkpointer is backed by
+a SQLite file rather than kept in memory.
 """
 
-from langgraph.checkpoint.memory import InMemorySaver
+import asyncio
+
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
 from app.agent.graph import compile_graph
+from app.config import get_settings
 
-_checkpointer = InMemorySaver()
-_graph = compile_graph(checkpointer=_checkpointer)
+_graph = None
+_checkpointer_cm = None
+_init_lock = asyncio.Lock()
+
+
+async def _get_graph():
+    global _graph, _checkpointer_cm
+    if _graph is not None:
+        return _graph
+    async with _init_lock:
+        if _graph is None:
+            _checkpointer_cm = AsyncSqliteSaver.from_conn_string(
+                get_settings().checkpoint_db_path
+            )
+            checkpointer = await _checkpointer_cm.__aenter__()
+            _graph = compile_graph(checkpointer=checkpointer)
+        return _graph
 
 
 def _thread_config(ticket_id: int) -> dict:
@@ -17,6 +37,7 @@ def _thread_config(ticket_id: int) -> dict:
 
 async def start_ticket_run(ticket_id: int, ticket_text: str) -> dict:
     """Runs the graph until completion or the first HITL interrupt."""
+    graph = await _get_graph()
     initial_state = {
         "messages": [],
         "ticket_id": ticket_id,
@@ -29,8 +50,8 @@ async def start_ticket_run(ticket_id: int, ticket_text: str) -> dict:
         "error": None,
     }
     config = _thread_config(ticket_id)
-    result = await _graph.ainvoke(initial_state, config=config)
-    return await _summarize(ticket_id, result, config)
+    result = await graph.ainvoke(initial_state, config=config)
+    return await _summarize(graph, ticket_id, result, config)
 
 
 async def resume_ticket_run(ticket_id: int) -> dict:
@@ -40,13 +61,14 @@ async def resume_ticket_run(ticket_id: int) -> dict:
     will surface the rejection via require_approval raising inside the MCP
     tool call, which the executor already catches and records as a failure.
     """
+    graph = await _get_graph()
     config = _thread_config(ticket_id)
-    result = await _graph.ainvoke(Command(resume=True), config=config)
-    return await _summarize(ticket_id, result, config)
+    result = await graph.ainvoke(Command(resume=True), config=config)
+    return await _summarize(graph, ticket_id, result, config)
 
 
-async def _summarize(ticket_id: int, result: dict, config: dict) -> dict:
-    snapshot = await _graph.aget_state(config)
+async def _summarize(graph, ticket_id: int, result: dict, config: dict) -> dict:
+    snapshot = await graph.aget_state(config)
     interrupts = getattr(snapshot, "interrupts", None) or ()
     pending_approval = interrupts[0].value if interrupts else None
 
