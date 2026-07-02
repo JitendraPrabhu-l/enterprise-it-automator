@@ -34,6 +34,7 @@
   }
   button:hover { opacity: .9; }
   button.secondary { background: #2a3040; }
+  button.secondary.active { background: var(--accent); }
   button.approve { background: var(--ok); }
   button.reject { background: var(--err); }
   button:disabled { opacity: .4; cursor: not-allowed; }
@@ -79,16 +80,29 @@
 </header>
 
 <main>
-  <section class="panel">
-    <h2>New Ticket</h2>
-    <label for="requester">Requester</label>
-    <input id="requester" value="hr@example.com" />
-    <label for="subject">Subject</label>
-    <input id="subject" value="Offboard employee" />
-    <label for="body">Body</label>
-    <textarea id="body">Offboard jsmith - disable her account, she left the company.</textarea>
-    <button id="submitBtn" onclick="submitTicket()">Submit Ticket</button>
-  </section>
+  <div style="display:flex; flex-direction:column; gap:20px;">
+    <section class="panel">
+      <h2>New Ticket</h2>
+      <label for="requester">Requester</label>
+      <input id="requester" value="hr@example.com" />
+      <label for="subject">Subject</label>
+      <input id="subject" value="Offboard employee" />
+      <label for="body">Body</label>
+      <textarea id="body">Offboard jsmith - disable her account, she left the company.</textarea>
+      <button id="submitBtn" onclick="submitTicket()">Submit Ticket</button>
+    </section>
+
+    <section class="panel">
+      <div class="toolbar">
+        <h2 style="margin:0">Employees</h2>
+        <div class="row">
+          <button class="secondary" id="empFilterActive" onclick="setEmployeeFilter('active')">Current</button>
+          <button class="secondary" id="empFilterDisabled" onclick="setEmployeeFilter('disabled')">Past</button>
+        </div>
+      </div>
+      <div id="employees"><p class="empty">Loading…</p></div>
+    </section>
+  </div>
 
   <div style="display:flex; flex-direction:column; gap:20px;">
     <section class="panel">
@@ -191,6 +205,38 @@ function badge(status) {
   return `<span class="badge ${status}">${status.replace(/_/g, " ")}</span>`;
 }
 
+let employeeFilter = "active";
+
+function setEmployeeFilter(filter) {
+  employeeFilter = filter;
+  document.getElementById("empFilterActive").classList.toggle("active", filter === "active");
+  document.getElementById("empFilterDisabled").classList.toggle("active", filter === "disabled");
+  renderEmployees();
+}
+
+async function renderEmployees() {
+  const el = document.getElementById("employees");
+  try {
+    const employees = await api(`/employees?status=${employeeFilter}`);
+    if (!employees.length) {
+      el.innerHTML = `<p class="empty">No ${employeeFilter === "active" ? "current" : "past"} employees.</p>`;
+      return;
+    }
+    el.innerHTML = employees.map(e => `
+      <div class="card">
+        <div class="card-head">
+          <strong>${escapeHtml(e.full_name)} · <code class="tool">${escapeHtml(e.username)}</code></strong>
+          ${badge(e.status)}
+        </div>
+        <div class="meta">${escapeHtml(e.email)}${e.department ? " · " + escapeHtml(e.department) : ""}</div>
+        <div class="meta">access: ${e.access_grants.length ? escapeHtml(e.access_grants.join(", ")) : "none"}</div>
+      </div>
+    `).join("");
+  } catch (e) {
+    el.innerHTML = `<p class="empty">Failed to load employees: ${e.message}</p>`;
+  }
+}
+
 async function renderApprovals() {
   const el = document.getElementById("approvals");
   try {
@@ -265,9 +311,10 @@ async function renderTickets() {
 }
 
 async function refreshAll() {
-  await Promise.all([renderApprovals(), renderTickets()]);
+  await Promise.all([renderApprovals(), renderTickets(), renderEmployees()]);
 }
 
+document.getElementById("empFilterActive").classList.add("active");
 refreshAll();
 setInterval(refreshAll, 8000);
 </script>
