@@ -11,6 +11,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
 from app.agent.graph import compile_graph
+from app.agent.mcp_session_cache import ticket_run_session
 from app.config import get_settings
 
 _graph = None
@@ -43,15 +44,18 @@ async def start_ticket_run(ticket_id: int, ticket_text: str) -> dict:
         "messages": [],
         "ticket_id": ticket_id,
         "ticket_text": ticket_text,
+        "category": "",
         "plan": [],
         "plan_index": 0,
         "pending_approval_id": None,
         "results": [],
         "done": False,
         "error": None,
+        "replan_count": 0,
     }
     config = _thread_config(ticket_id)
-    result = await graph.ainvoke(initial_state, config=config)
+    async with ticket_run_session(ticket_id):
+        result = await graph.ainvoke(initial_state, config=config)
     return await _summarize(graph, ticket_id, result, config)
 
 
@@ -61,10 +65,16 @@ async def resume_ticket_run(ticket_id: int) -> dict:
     Safe to call even if the approval was rejected — execute_step / finalize
     will surface the rejection via require_approval raising inside the MCP
     tool call, which the executor already catches and records as a failure.
+
+    Opens its own fresh MCP session (via ticket_run_session), separate from
+    whatever session start_ticket_run used before the interrupt — a live
+    subprocess/connection can't survive the pause, which may be hours long
+    and cross a process restart, unlike the DB-backed checkpoint state.
     """
     graph = await _get_graph()
     config = _thread_config(ticket_id)
-    result = await graph.ainvoke(Command(resume=True), config=config)
+    async with ticket_run_session(ticket_id):
+        result = await graph.ainvoke(Command(resume=True), config=config)
     return await _summarize(graph, ticket_id, result, config)
 
 
