@@ -5,8 +5,7 @@ tickets by reasoning over a custom **Model Context Protocol (MCP)** server, with
 **human-in-the-loop (HITL)** approval enforced server-side for sensitive actions.
 
 
-![1783097149525](image/README/1783097149525.png)
-
+![1783097386944](image/README/1783097386944.png)
 
 ## Architecture
 
