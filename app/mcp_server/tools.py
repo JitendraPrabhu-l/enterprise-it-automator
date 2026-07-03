@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db.models import AuditLog, EmployeeUser, UserStatus
+from app.db.models import AuditLog, EmployeeUser, Ticket, UserStatus
 
 
 class ToolError(Exception):
@@ -21,7 +21,15 @@ DEPARTMENT_ACCESS_DEFAULTS: dict[str, list[str]] = {
     "it": ["vpn", "github:engineering", "admin-panel"],
     "hr": ["vpn", "workday"],
     "finance": ["vpn", "netsuite"],
+    "executive": ["vpn", "admin-panel", "netsuite", "workday"],
 }
+
+# Domain prefixes the gateway (server.py) namespaces every tool name with —
+# is_sensitive() strips these before checking against SENSITIVE_ACTIONS so
+# the env var stays configured with bare action names regardless of
+# namespacing, and approval_gate checks work against whichever form a
+# caller uses.
+_DOMAIN_PREFIXES = ("identity_", "access_", "ticketing_")
 
 
 def default_access_for_department(department: str) -> list[str]:
@@ -35,6 +43,13 @@ async def _get_user(session: AsyncSession, username: str) -> EmployeeUser:
     if user is None:
         raise ToolError(f"No such user: {username!r}")
     return user
+
+
+async def _get_ticket(session: AsyncSession, ticket_id: int) -> Ticket:
+    ticket = await session.get(Ticket, ticket_id)
+    if ticket is None:
+        raise ToolError(f"No such ticket: {ticket_id}")
+    return ticket
 
 
 async def _audit(
@@ -59,7 +74,12 @@ async def _audit(
 
 
 def is_sensitive(tool_name: str) -> bool:
-    return tool_name in get_settings().sensitive_action_set
+    bare_name = tool_name
+    for prefix in _DOMAIN_PREFIXES:
+        if tool_name.startswith(prefix):
+            bare_name = tool_name[len(prefix):]
+            break
+    return bare_name in get_settings().sensitive_action_set
 
 
 async def get_user(session: AsyncSession, username: str) -> dict:
@@ -161,3 +181,22 @@ async def revoke_access(
         f"revoked {resource} from {username}", True, ticket_id,
     )
     return {"username": user.username, "access_grants": user.access_grants}
+
+
+async def add_ticket_comment(session: AsyncSession, ticket_id: int, comment: str) -> dict:
+    """Simulated ticketing-system sync: appends to the ticket's own
+    result_summary field, standing in for a real Jira/ServiceNow API call
+    that would post a comment back to the external system of record.
+    """
+    ticket = await _get_ticket(session, ticket_id)
+    ticket.result_summary = f"{ticket.result_summary}\n{comment}".strip()
+    await _audit(
+        session, "mcp-client", "ticketing_add_ticket_comment", {"ticket_id": ticket_id, "comment": comment},
+        f"posted comment to ticket {ticket_id}", True, ticket_id,
+    )
+    return {"ticket_id": ticket_id, "comment": comment}
+
+
+async def get_ticket_status(session: AsyncSession, ticket_id: int) -> dict:
+    ticket = await _get_ticket(session, ticket_id)
+    return {"ticket_id": ticket.id, "status": ticket.status.value, "result_summary": ticket.result_summary}
