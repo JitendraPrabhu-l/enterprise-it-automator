@@ -44,6 +44,24 @@ class Settings(BaseSettings):
     # refuses to start the http transport without it.
     mcp_server_token: str = ""
 
+    # Comma-separated Origin/Host allowlists for the MCP gateway's
+    # streamable-HTTP transport (MCP spec 2025-11-25's "Servers MUST
+    # validate the Origin header on all incoming connections to prevent
+    # DNS rebinding attacks"). The installed mcp SDK already ships
+    # DNS-rebinding protection (mcp.server.transport_security's
+    # TransportSecuritySettings) but leaves it OFF by default "for
+    # backwards compatibility" — app/mcp_server/server.py turns it on and
+    # feeds it these two allowlists. Left blank by default and computed
+    # from mcp_server_port at call time (see mcp_allowed_host_list below)
+    # rather than a hardcoded literal, so it stays correct if the port is
+    # ever changed. This project's only real caller is the agent process
+    # itself (a server-to-server httpx client, which never sends an Origin
+    # header at all — only browsers inject that header) — a deployment
+    # fronting the gateway with a real hostname must add it here
+    # explicitly rather than get a silently permissive default.
+    mcp_allowed_hosts: str = ""
+    mcp_allowed_origins: str = ""
+
     sensitive_actions: str = "disable_user,revoke_access"
 
     api_host: str = "0.0.0.0"
@@ -70,6 +88,17 @@ class Settings(BaseSettings):
     @property
     def sensitive_action_set(self) -> set[str]:
         return {a.strip() for a in self.sensitive_actions.split(",") if a.strip()}
+
+    @property
+    def mcp_allowed_host_list(self) -> list[str]:
+        explicit = [h.strip() for h in self.mcp_allowed_hosts.split(",") if h.strip()]
+        if explicit:
+            return explicit
+        return [f"127.0.0.1:{self.mcp_server_port}", f"localhost:{self.mcp_server_port}"]
+
+    @property
+    def mcp_allowed_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.mcp_allowed_origins.split(",") if o.strip()]
 
 
 @lru_cache
