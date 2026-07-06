@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+.pytest_cache/
+*.egg-info/
+.idea/
+.vscode/
+.git/
+.gitignore
+tests/
+data/
+*.md
+INTERVIEW_PREP.md
+JD.docx
+Untitled document*.pdf
