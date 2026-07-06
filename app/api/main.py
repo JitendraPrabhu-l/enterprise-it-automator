@@ -5,13 +5,15 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from ag_ui.encoder import EventEncoder
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from sqlalchemy import select, text
 
+from app.agent.ag_ui_bridge import stream_resume_run, stream_ticket_run
 from app.agent.runner import resume_ticket_run, start_ticket_run
 from app.agent.sla_sweep import run_sla_sweep, sla_sweep_loop
 from app.api.auth import require_api_key, require_reviewer_token
@@ -186,6 +188,41 @@ async def submit_ticket(
     return RunResult(**result)
 
 
+@app.post("/tickets/stream", dependencies=[Depends(require_api_key)])
+@limiter.limit("20/minute")
+async def submit_ticket_stream(request: Request, payload: TicketCreate) -> StreamingResponse:
+    """AG-UI-protocol streaming counterpart to POST /tickets (see
+    app/agent/ag_ui_bridge.py): creates the ticket the same way, then
+    streams RUN_STARTED/STEP_*/TOOL_CALL_*/STATE_DELTA/RUN_FINISHED events
+    over SSE as the graph actually executes, instead of blocking until the
+    first interrupt or completion and returning one JSON blob.
+
+    No Idempotency-Key support here — replaying a cached *stream* doesn't
+    make sense the way replaying a cached final JSON result does; a client
+    that needs idempotent ticket submission should use POST /tickets.
+    """
+    async with session_scope() as session:
+        ticket = Ticket(
+            requester=payload.requester,
+            subject=payload.subject,
+            body=payload.body,
+            status=TicketStatus.PLANNING,
+        )
+        session.add(ticket)
+        await session.flush()
+        ticket_id = ticket.id
+        ticket_text = f"Subject: {payload.subject}\n\n{payload.body}"
+
+    encoder = EventEncoder()
+    run_id = str(uuid.uuid4())
+
+    async def event_source():
+        async for event in stream_ticket_run(ticket_id, ticket_text, run_id):
+            yield encoder.encode(event)
+
+    return StreamingResponse(event_source(), media_type=encoder.get_content_type())
+
+
 @app.get("/tickets", response_model=list[TicketOut], dependencies=[Depends(require_api_key)])
 async def list_tickets() -> list[Ticket]:
     async with session_scope() as session:
@@ -303,6 +340,75 @@ async def decide_approval(
 
     result = await resume_ticket_run(ticket_id)
     return RunResult(**result)
+
+
+@app.post(
+    "/approvals/{approval_id}/decide/stream",
+    dependencies=[Depends(require_api_key)],
+)
+@limiter.limit("20/minute")
+async def decide_approval_stream(
+    request: Request,
+    approval_id: int,
+    payload: ApprovalDecision,
+    reviewer: Reviewer = Depends(require_reviewer_token),
+) -> StreamingResponse:
+    """AG-UI-protocol streaming counterpart to POST /approvals/{id}/decide:
+    same authorization and decision recording, but a resumed (approved) run
+    streams its remaining STEP_*/TOOL_CALL_*/RUN_FINISHED events over SSE
+    instead of blocking until the run's next interrupt or completion.
+    """
+    async with session_scope() as session:
+        approval = await session.get(Approval, approval_id)
+        if approval is None:
+            raise HTTPException(404, f"No such approval: {approval_id}")
+        if approval.status != ApprovalStatus.PENDING:
+            raise HTTPException(409, f"Approval {approval_id} already {approval.status.value}")
+
+        try:
+            await authorize_reviewer(session, reviewer.username, approval)
+        except ApprovalNotAuthorizedError as exc:
+            raise HTTPException(403, str(exc)) from exc
+
+        from datetime import datetime, timezone
+
+        approval.status = ApprovalStatus.APPROVED if payload.approve else ApprovalStatus.REJECTED
+        approval.reviewer = reviewer.username
+        approval.resolved_at = datetime.now(timezone.utc)
+        ticket_id = approval.ticket_id
+
+        if not payload.approve:
+            ticket = await session.get(Ticket, ticket_id)
+            if ticket is not None:
+                ticket.status = TicketStatus.REJECTED
+                ticket.result_summary = (
+                    f"Sensitive action {approval.tool_name} rejected by {reviewer.username}."
+                )
+
+    encoder = EventEncoder()
+    run_id = str(uuid.uuid4())
+
+    if not payload.approve:
+        from ag_ui.core import RunFinishedEvent, RunFinishedSuccessOutcome, RunStartedEvent
+
+        async def rejection_source():
+            yield encoder.encode(RunStartedEvent(thread_id=f"ticket-{ticket_id}", run_id=run_id))
+            yield encoder.encode(
+                RunFinishedEvent(
+                    thread_id=f"ticket-{ticket_id}",
+                    run_id=run_id,
+                    outcome=RunFinishedSuccessOutcome(),
+                    result={"error": "Rejected by reviewer", "done": True},
+                )
+            )
+
+        return StreamingResponse(rejection_source(), media_type=encoder.get_content_type())
+
+    async def event_source():
+        async for event in stream_resume_run(ticket_id, run_id):
+            yield encoder.encode(event)
+
+    return StreamingResponse(event_source(), media_type=encoder.get_content_type())
 
 
 @app.get(
