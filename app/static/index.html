@@ -104,7 +104,18 @@
       <input id="subject" value="Offboard employee" />
       <label for="body">Body</label>
       <textarea id="body">Offboard jsmith - disable her account, she left the company.</textarea>
-      <button id="submitBtn" onclick="submitTicket()">Submit Ticket</button>
+      <div class="row">
+        <button id="submitBtn" onclick="submitTicket()">Submit Ticket</button>
+        <button class="secondary" id="submitStreamBtn" onclick="submitTicketStream()">Submit &amp; Watch Live (AG-UI)</button>
+      </div>
+    </section>
+
+    <section class="panel" id="liveActivityPanel" style="display:none">
+      <div class="toolbar">
+        <h2 style="margin:0">Live Activity (AG-UI event stream)</h2>
+        <button class="link-btn" onclick="document.getElementById('liveActivityPanel').style.display='none'">Close</button>
+      </div>
+      <div id="liveActivity"></div>
     </section>
 
     <section class="panel">
@@ -233,6 +244,117 @@ async function decide(approvalId, approve) {
   }
 }
 
+// --- AG-UI streaming (https://docs.ag-ui.com) -----------------------------
+// Native EventSource can't send custom headers (X-API-Key/X-Reviewer-Token),
+// so this reads the SSE body directly off a fetch() stream instead — same
+// "data: <json>\n\n" framing EventSource itself parses, just done by hand.
+async function* readSseEvents(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const line = frame.split("\n").find(l => l.startsWith("data:"));
+      if (!line) continue;
+      try {
+        yield JSON.parse(line.slice(5).trim());
+      } catch (e) {
+        console.warn("Failed to parse AG-UI event", line, e);
+      }
+    }
+  }
+}
+
+function liveActivityLog(msg, cls) {
+  const el = document.getElementById("liveActivity");
+  document.getElementById("liveActivityPanel").style.display = "block";
+  const line = document.createElement("div");
+  line.className = "audit-row" + (cls ? " " + cls : "");
+  line.textContent = msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+
+function describeAgUiEvent(evt) {
+  switch (evt.type) {
+    case "RUN_STARTED": return `Run started (thread ${evt.threadId})`;
+    case "STEP_STARTED": return `▶ ${evt.stepName}`;
+    case "STEP_FINISHED": return `✓ ${evt.stepName} finished`;
+    case "TOOL_CALL_START": return `  → calling ${evt.toolCallName}`;
+    case "TOOL_CALL_RESULT": return `  ← result: ${String(evt.content).slice(0, 200)}`;
+    case "STATE_DELTA": return `  state: ${JSON.stringify(evt.delta)}`;
+    case "RUN_ERROR": return `✗ ERROR: ${evt.message}`;
+    case "RUN_FINISHED":
+      if (evt.outcome && evt.outcome.type === "interrupt") {
+        const interrupt = evt.outcome.interrupts[0];
+        return `⏸ Paused for approval: ${interrupt.message}`;
+      }
+      return `■ Run finished`;
+    default: return `${evt.type}`;
+  }
+}
+
+async function streamAgUiEvents(path, opts, onFinished) {
+  opts = opts || {};
+  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+  const key = apiKeyInput.value;
+  if (key) headers["X-API-Key"] = key;
+  document.getElementById("liveActivity").innerHTML = "";
+  const res = await fetch(API + path, Object.assign({}, opts, { headers }));
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    liveActivityLog("Failed to start stream: " + (data.detail ? JSON.stringify(data.detail) : res.statusText), "err");
+    return;
+  }
+  for await (const evt of readSseEvents(res)) {
+    liveActivityLog(describeAgUiEvent(evt), evt.type === "RUN_ERROR" ? "err" : "");
+    if (evt.type === "RUN_FINISHED" && typeof onFinished === "function") onFinished(evt);
+  }
+}
+
+async function submitTicketStream() {
+  const btn = document.getElementById("submitStreamBtn");
+  btn.disabled = true;
+  try {
+    const payload = {
+      requester: document.getElementById("requester").value,
+      subject: document.getElementById("subject").value,
+      body: document.getElementById("body").value,
+    };
+    await streamAgUiEvents("/tickets/stream", { method: "POST", body: JSON.stringify(payload) }, async () => {
+      await refreshAll();
+    });
+  } catch (e) {
+    toast("Live stream failed: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function decideStream(approvalId, approve) {
+  const reviewerToken = reviewerInput.value.trim();
+  if (!reviewerToken) {
+    toast("Enter your reviewer token (top right) before approving/rejecting — see `python -m app.db.seed` output.", true);
+    reviewerInput.focus();
+    return;
+  }
+  try {
+    await streamAgUiEvents(
+      `/approvals/${approvalId}/decide/stream`,
+      { method: "POST", headers: { "X-Reviewer-Token": reviewerToken }, body: JSON.stringify({ approve }) },
+      async () => { await refreshAll(); }
+    );
+  } catch (e) {
+    toast("Live stream failed: " + e.message, true);
+  }
+}
+
 function badge(status) {
   return `<span class="badge ${escapeHtml(status)}">${escapeHtml(status.replace(/_/g, " "))}</span>`;
 }
@@ -300,6 +422,7 @@ async function renderApprovals() {
           : `<div class="row" style="margin-top:8px">
           <button class="approve" onclick="decide(${a.id}, true)">Approve</button>
           <button class="reject" onclick="decide(${a.id}, false)">Reject</button>
+          <button class="secondary" onclick="decideStream(${a.id}, true)" title="Approve and stream the resumed run's AG-UI events live">Approve &amp; Watch</button>
         </div>`}
       </div>
     `).join("");
