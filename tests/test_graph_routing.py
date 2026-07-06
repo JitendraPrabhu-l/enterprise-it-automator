@@ -1,9 +1,13 @@
 import json
 
+import pytest
+
 from app.agent.graph import (
+    MAX_PLAN_LENGTH,
     _describe_result,
     _extract_json_array,
     _extract_username,
+    _mask_pii_for_prompt,
     route_after_plan,
     route_after_step_check,
 )
@@ -42,6 +46,17 @@ async def test_extract_username_empty_returns_none():
     assert await _extract_username(_FakeLLM("   "), "ticket text") is None
 
 
+async def test_extract_username_rejects_malformed_looking_username():
+    """A response that doesn't look like a plausible username (e.g. an
+    injection attempt or garbage the LLM echoed back) must be treated as
+    unidentified, not passed through to _observe_user/the planner."""
+    assert await _extract_username(_FakeLLM("'; DROP TABLE users; --"), "ticket text") is None
+
+
+async def test_extract_username_accepts_dotted_and_hyphenated_usernames():
+    assert await _extract_username(_FakeLLM("j.smith-2"), "ticket text") == "j.smith-2"
+
+
 def test_extract_json_array_plain():
     assert _extract_json_array('[{"tool": "get_user", "args": {}}]') == [
         {"tool": "get_user", "args": {}}
@@ -60,6 +75,33 @@ def test_extract_json_array_with_surrounding_prose():
 
 def test_extract_json_array_empty_plan():
     assert _extract_json_array("[]") == []
+
+
+def test_extract_json_array_allows_plan_at_max_length():
+    steps = [{"tool": "get_user", "args": {"n": i}} for i in range(MAX_PLAN_LENGTH)]
+    assert _extract_json_array(json.dumps(steps)) == steps
+
+
+def test_extract_json_array_rejects_plan_over_max_length():
+    steps = [{"tool": "get_user", "args": {"n": i}} for i in range(MAX_PLAN_LENGTH + 1)]
+    with pytest.raises(ValueError, match="exceeding the"):
+        _extract_json_array(json.dumps(steps))
+
+
+def test_extract_json_array_rejects_step_with_malformed_username():
+    raw = json.dumps([{"tool": "identity_disable_user", "args": {"username": "'; DROP TABLE users; --"}}])
+    with pytest.raises(ValueError, match="doesn't look like a"):
+        _extract_json_array(raw)
+
+
+def test_extract_json_array_accepts_step_with_valid_username():
+    steps = [{"tool": "identity_disable_user", "args": {"username": "j.smith-2"}}]
+    assert _extract_json_array(json.dumps(steps)) == steps
+
+
+def test_extract_json_array_allows_step_with_no_username_arg():
+    steps = [{"tool": "ticketing_get_ticket_status", "args": {"ticket_id": 1}}]
+    assert _extract_json_array(json.dumps(steps)) == steps
 
 
 def test_extract_json_array_raises_on_garbage():
@@ -132,3 +174,31 @@ def test_describe_result_unknown_tool_uses_generic_message():
     raw = json.dumps({"username": "jsmith"})
     desc = _describe_result("some_future_tool", {"username": "jsmith"}, raw)
     assert desc == "some_future_tool completed for jsmith."
+
+
+def test_mask_pii_for_prompt_strips_full_name_and_email():
+    raw = json.dumps({
+        "username": "jsmith", "full_name": "Jane Smith", "email": "jsmith@example.com",
+        "department": "Engineering", "status": "active", "access_grants": ["vpn"],
+    })
+    masked = json.loads(_mask_pii_for_prompt(raw))
+    assert masked == {
+        "username": "jsmith", "department": "Engineering",
+        "status": "active", "access_grants": ["vpn"],
+    }
+    assert "full_name" not in masked
+    assert "email" not in masked
+
+
+def test_mask_pii_for_prompt_leaves_planning_relevant_fields_intact():
+    raw = json.dumps({"username": "jsmith", "status": "disabled", "access_grants": []})
+    masked = json.loads(_mask_pii_for_prompt(raw))
+    assert masked == {"username": "jsmith", "status": "disabled", "access_grants": []}
+
+
+def test_mask_pii_for_prompt_passes_through_non_json_unchanged():
+    assert _mask_pii_for_prompt("User already exists: 'jsmith'") == "User already exists: 'jsmith'"
+
+
+def test_mask_pii_for_prompt_passes_through_non_dict_json_unchanged():
+    assert _mask_pii_for_prompt("[1, 2, 3]") == "[1, 2, 3]"

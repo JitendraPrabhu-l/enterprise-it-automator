@@ -23,6 +23,11 @@ async def test_create_user_grants_department_defaults(session):
     assert it_user["access_grants"] == ["vpn", "github:engineering", "admin-panel"]
 
 
+async def test_create_user_grants_executive_defaults(session):
+    exec_user = await t.create_user(session, "cexec", "Casey Exec", "c@example.com", "Executive")
+    assert exec_user["access_grants"] == ["vpn", "admin-panel", "netsuite", "workday"]
+
+
 async def test_create_user_unknown_department_gets_vpn_only(session):
     created = await t.create_user(session, "nuser", "New User", "n@example.com", "Marketing")
     assert created["access_grants"] == ["vpn"]
@@ -92,6 +97,14 @@ async def test_is_sensitive():
     assert t.is_sensitive("get_user") is False
 
 
+async def test_is_sensitive_strips_domain_namespace():
+    assert t.is_sensitive("identity_disable_user") is True
+    assert t.is_sensitive("access_revoke_access") is True
+    assert t.is_sensitive("identity_create_user") is False
+    assert t.is_sensitive("access_grant_access") is False
+    assert t.is_sensitive("ticketing_add_ticket_comment") is False
+
+
 async def test_audit_log_written_on_mutations(session):
     from sqlalchemy import select
 
@@ -104,3 +117,37 @@ async def test_audit_log_written_on_mutations(session):
     assert [r.tool_name for r in rows] == ["create_user", "grant_access"]
     assert all(r.ticket_id == 42 for r in rows)
     assert all(r.success for r in rows)
+
+
+async def test_add_ticket_comment(session):
+    from app.db.models import Ticket, TicketStatus
+
+    ticket = Ticket(id=1, requester="hr@x.com", subject="s", body="b", status=TicketStatus.PLANNING)
+    session.add(ticket)
+    await session.flush()
+
+    result = await t.add_ticket_comment(session, 1, "Working on it")
+    assert result == {"ticket_id": 1, "comment": "Working on it"}
+    assert "Working on it" in ticket.result_summary
+
+
+async def test_add_ticket_comment_not_found(session):
+    with pytest.raises(ToolError, match="No such ticket"):
+        await t.add_ticket_comment(session, 999, "hello")
+
+
+async def test_get_ticket_status(session):
+    from app.db.models import Ticket, TicketStatus
+
+    ticket = Ticket(id=2, requester="hr@x.com", subject="s", body="b", status=TicketStatus.COMPLETED)
+    session.add(ticket)
+    await session.flush()
+
+    result = await t.get_ticket_status(session, 2)
+    assert result["ticket_id"] == 2
+    assert result["status"] == "completed"
+
+
+async def test_get_ticket_status_not_found(session):
+    with pytest.raises(ToolError, match="No such ticket"):
+        await t.get_ticket_status(session, 999)

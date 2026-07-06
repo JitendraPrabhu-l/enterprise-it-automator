@@ -5,13 +5,13 @@
 # create_async_engine on whatever URL is configured) and asyncpg is a base
 # dependency, so this should work — not yet validated against a live
 # container here (blocked on a local Docker credential-helper issue during
-# development; written to be validated once that's resolved). The
-# LangGraph CHECKPOINT_DB_PATH deliberately stays on a SQLite file on a
-# named volume for now — AsyncPostgresSaver would need to be swapped in for
-# app/agent/runner.py's checkpointer before that env var could safely become
-# a Postgres URL too (that's genuinely unimplemented, unlike the app DB).
-# Don't point CHECKPOINT_DB_PATH at Postgres without making that code
-# change first.
+# development; written to be validated once that's resolved). CHECKPOINT_DB_PATH
+# below is now also a Postgres URL: app/agent/runner.py picks AsyncPostgresSaver
+# instead of AsyncSqliteSaver whenever this value starts with "postgresql://"
+# (a plain psycopg-style URL — deliberately not "+asyncpg", since
+# langgraph-checkpoint-postgres depends on psycopg, not asyncpg, even though
+# it's the same physical Postgres instance as DATABASE_URL). Still equally
+# unvalidated against a live container as the app DB, for the same reason.
 #
 # The mcp-server service demonstrates the "remote MCP server" deployment
 # shape (MCP_TRANSPORT=http) — the app connects to it over the network
@@ -34,19 +34,21 @@
 # but "don't expose the port at all" is a strictly stronger one available
 # here for free.
 #
-# SECURITY: POSTGRES_PASSWORD falls back to a publicly-documented default
-# (itauto_dev_pw) if unset, and port 5432 is published to the host network.
-# This default is fine for a fully local, single-user demo, but you MUST
-# set a real POSTGRES_PASSWORD in your environment (not committed anywhere)
-# before running this anywhere other than localhost — there is no runtime
-# warning if you don't, unlike API_KEY.
+# SECURITY: POSTGRES_PASSWORD and API_KEY are both required (compose's `:?`
+# syntax) with no fallback default — this file previously fell back to a
+# publicly-documented default Postgres password (itauto_dev_pw) with no
+# runtime warning if left unset, unlike MCP_SERVER_TOKEN which already
+# hard-failed. Both secrets now fail fast the same way MCP_SERVER_TOKEN
+# does: `docker compose up` refuses to start at all rather than silently
+# running with a known-weak/no credential. Export real values in your shell
+# or an untracked .env before running compose.
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: itauto
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-itauto_dev_pw}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set — no insecure default is provided}
       POSTGRES_DB: it_automator
     ports:
       - "5432:5432"
@@ -63,7 +65,7 @@ services:
     command:
       ["python", "-m", "app.mcp_server.server", "--transport", "http"]
     environment:
-      DATABASE_URL: postgresql+asyncpg://itauto:${POSTGRES_PASSWORD:-itauto_dev_pw}@postgres:5432/it_automator
+      DATABASE_URL: postgresql+asyncpg://itauto:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set — no insecure default is provided}@postgres:5432/it_automator
       MCP_TRANSPORT: http
       MCP_SERVER_HOST: 0.0.0.0
       MCP_SERVER_PORT: "8765"
@@ -87,8 +89,8 @@ services:
   app:
     build: .
     environment:
-      DATABASE_URL: postgresql+asyncpg://itauto:${POSTGRES_PASSWORD:-itauto_dev_pw}@postgres:5432/it_automator
-      CHECKPOINT_DB_PATH: /app/data/it_automator_checkpoints.db
+      DATABASE_URL: postgresql+asyncpg://itauto:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set — no insecure default is provided}@postgres:5432/it_automator
+      CHECKPOINT_DB_PATH: postgresql://itauto:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set — no insecure default is provided}@postgres:5432/it_automator
       MCP_TRANSPORT: http
       MCP_SERVER_URL: http://mcp-server:8765/mcp
       MCP_SERVER_TOKEN: ${MCP_SERVER_TOKEN:?MCP_SERVER_TOKEN must be set — the http transport refuses to start without it}
@@ -105,7 +107,7 @@ services:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-meta-llama/llama-3.3-70b-instruct:free}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
-      API_KEY: ${API_KEY:-}
+      API_KEY: ${API_KEY:?API_KEY must be set — the app would otherwise start with all API auth disabled}
     ports:
       - "8000:8000"
     volumes:

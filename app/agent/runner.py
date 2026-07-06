@@ -1,7 +1,7 @@
 """Drives the agent graph, persisting interrupted runs so approval can resume
 them later from a separate HTTP request (a different process tick entirely) —
 including across an application restart, since the checkpointer is backed by
-a SQLite file rather than kept in memory.
+a durable store (SQLite file or Postgres) rather than kept in memory.
 """
 
 import asyncio
@@ -19,6 +19,12 @@ _checkpointer_cm = None
 _init_lock = asyncio.Lock()
 
 
+def _is_postgres_url(checkpoint_db_path: str) -> bool:
+    return checkpoint_db_path.startswith("postgresql://") or checkpoint_db_path.startswith(
+        "postgres://"
+    )
+
+
 async def _get_graph():
     global _graph, _checkpointer_cm
     if _graph is not None:
@@ -26,9 +32,18 @@ async def _get_graph():
     async with _init_lock:
         if _graph is None:
             checkpoint_db_path = get_settings().checkpoint_db_path
-            Path(checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
-            _checkpointer_cm = AsyncSqliteSaver.from_conn_string(checkpoint_db_path)
-            checkpointer = await _checkpointer_cm.__aenter__()
+            if _is_postgres_url(checkpoint_db_path):
+                # Imported lazily so the sqlite-only default path never
+                # requires psycopg's native libpq wrapper to be installed.
+                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+                _checkpointer_cm = AsyncPostgresSaver.from_conn_string(checkpoint_db_path)
+                checkpointer = await _checkpointer_cm.__aenter__()
+                await checkpointer.setup()
+            else:
+                Path(checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
+                _checkpointer_cm = AsyncSqliteSaver.from_conn_string(checkpoint_db_path)
+                checkpointer = await _checkpointer_cm.__aenter__()
             _graph = compile_graph(checkpointer=checkpointer)
         return _graph
 

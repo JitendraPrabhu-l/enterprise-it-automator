@@ -1,6 +1,13 @@
 mcp>=1.2.0
 langgraph>=0.2.60
 langgraph-checkpoint-sqlite>=2.0.0
+langgraph-checkpoint-postgres>=2.0.0
+# langgraph-checkpoint-postgres depends on plain "psycopg", which has no
+# working Postgres driver at runtime unless a wrapper is installed (the
+# "python" fallback needs a system libpq, which slim container images and
+# most dev machines don't have) — pin the binary wheel explicitly rather
+# than rely on it being pulled in transitively.
+psycopg[binary]>=3.2.0
 langchain-core>=0.3.28
 langchain-groq>=0.2.3
 langchain-anthropic>=0.3.3

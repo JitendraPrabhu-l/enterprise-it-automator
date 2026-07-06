@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
     database_url: str = "sqlite+aiosqlite:///./data/it_automator.db"
+    # Either a SQLite file path (default — AsyncSqliteSaver) or a
+    # "postgresql://..." connection string (AsyncPostgresSaver). Deliberately
+    # a plain psycopg-style URL, not "postgresql+asyncpg://" like
+    # database_url above — the two checkpointer backends use different
+    # drivers (langgraph-checkpoint-postgres depends on psycopg, the app DB
+    # layer on asyncpg), so this can't just reuse database_url's value even
+    # when both point at the same Postgres instance.
     checkpoint_db_path: str = "./data/it_automator_checkpoints.db"
 
     mcp_transport: str = "stdio"
