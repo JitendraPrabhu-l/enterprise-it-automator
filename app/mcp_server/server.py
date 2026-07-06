@@ -216,11 +216,38 @@ def _authenticated_streamable_http_app() -> Starlette:
     return app
 
 
+async def _serve(transport: str) -> None:
+    # _bootstrap() and the actual serving loop below MUST run in the same
+    # asyncio event loop — app/db/session.py's engine is created here (via
+    # init_db()) as a module-level singleton, and asyncpg binds every
+    # connection it opens to whichever event loop was running at connect
+    # time. Previously main() called `asyncio.run(_bootstrap())` (its own
+    # throwaway loop, torn down as soon as it returned) and then separately
+    # started uvicorn/mcp.run(), which spins up ANOTHER event loop to serve
+    # requests — every session_scope() call from a request handler then
+    # tried to reuse pooled connections that belonged to the already-closed
+    # bootstrap loop. Live-verified against a real docker-compose Postgres
+    # container: this produced "asyncpg.exceptions.InterfaceError: cannot
+    # perform operation: another operation is in progress" on the first
+    # identity_create_user call in HTTP-transport mode. SQLite/aiosqlite
+    # doesn't bind connections to a loop the same way, so this was silent
+    # under the (default, and previously only ever actually run) SQLite
+    # setup — Postgres just exposed a bug that applies to both transports.
+    await _bootstrap()
+    if transport == "http":
+        import uvicorn
+
+        app = _authenticated_streamable_http_app()
+        config = uvicorn.Config(app, host=_settings.mcp_server_host, port=_settings.mcp_server_port)
+        server = uvicorn.Server(config)
+        await server.serve()
+    else:
+        await mcp.run_stdio_async()
+
+
 def main() -> None:
     import argparse
     import asyncio
-
-    import uvicorn
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -231,12 +258,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    asyncio.run(_bootstrap())
-    if args.transport == "http":
-        app = _authenticated_streamable_http_app()
-        uvicorn.run(app, host=_settings.mcp_server_host, port=_settings.mcp_server_port)
-    else:
-        mcp.run(transport="stdio")
+    asyncio.run(_serve(args.transport))
 
 
 if __name__ == "__main__":
