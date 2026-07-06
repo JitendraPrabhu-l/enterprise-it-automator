@@ -17,14 +17,29 @@ local/dev use via add_tool() namespacing.
 """
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from app.db.session import session_scope
 from app.mcp_server import tools as t
 
 ticketing_mcp = FastMCP("ticketing")
 
+# openWorldHint=False on both tools below reflects the CURRENT simulated
+# implementation (this domain only touches this app's own local Ticket
+# table — see module docstring). If this simulation is ever replaced with
+# a real Jira/ServiceNow API call, openWorldHint should flip to True, since
+# the tool would then interact with an external system this app doesn't
+# control.
 
-@ticketing_mcp.tool()
+
+@ticketing_mcp.tool(
+    # Not idempotentHint: each call appends another comment
+    # (tools.py's add_ticket_comment does `f"{existing}\n{comment}"`) — two
+    # identical calls produce two comments, a different effect than one.
+    annotations=ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+    )
+)
 async def add_ticket_comment(ticket_id: int, comment: str) -> dict:
     """Post a status comment back to the external ticketing system for this
     ticket. Not sensitive — informational only, doesn't mutate identity or
@@ -33,7 +48,11 @@ async def add_ticket_comment(ticket_id: int, comment: str) -> dict:
         return await t.add_ticket_comment(session, ticket_id, comment)
 
 
-@ticketing_mcp.tool()
+@ticketing_mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    )
+)
 async def get_ticket_status(ticket_id: int) -> dict:
     """Look up the current status of a ticket in the external ticketing
     system (simulated: reflects this app's own Ticket record, which is
