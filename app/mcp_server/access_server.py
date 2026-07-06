@@ -8,6 +8,7 @@ local/dev use via add_tool() namespacing.
 """
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from app.db.session import session_scope
 from app.mcp_server import tools as t
@@ -16,7 +17,14 @@ from app.mcp_server.approval_gate import require_approval
 access_mcp = FastMCP("access")
 
 
-@access_mcp.tool()
+@access_mcp.tool(
+    # idempotentHint=True: tools.py's grant_access dedups
+    # ("if resource not in user.access_grants") — a repeat call with the
+    # same args is a genuine no-op, unlike create_user/disable_user above.
+    annotations=ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    )
+)
 async def grant_access(
     username: str, resource: str, ticket_id: int | None = None
 ) -> dict:
@@ -27,7 +35,16 @@ async def grant_access(
         )
 
 
-@access_mcp.tool()
+@access_mcp.tool(
+    # destructiveHint=True: removing access is a real, consequential state
+    # change (this is also the SENSITIVE tool requiring approval — see
+    # require_approval below). Not idempotentHint: a second call once the
+    # resource is already revoked fails with "does not have access" rather
+    # than succeeding as a no-op.
+    annotations=ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
+    )
+)
 async def revoke_access(
     username: str, resource: str, approval_id: int, ticket_id: int | None = None
 ) -> dict:
