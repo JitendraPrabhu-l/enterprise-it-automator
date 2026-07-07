@@ -23,6 +23,20 @@ def test_accepts_ticket_id_true_for_mutating_identity_and_access_tools():
     assert accepts_ticket_id("revoke_access") is True
 
 
+def test_accepts_ticket_id_true_for_ticketing_tools():
+    """Regression test for a live bug: discover_tool_reference() surfaces
+    ticketing_add_ticket_comment/get_ticket_status to the planner, and
+    nothing stopped the LLM from spontaneously planning one even though no
+    category prompt tells it to — when it did, the call failed FastMCP's
+    own arg validation every time, since ticket_id is REQUIRED for both
+    (unlike the optional param on the identity/access tools) and nothing
+    supplied it."""
+    assert accepts_ticket_id("add_ticket_comment") is True
+    assert accepts_ticket_id("get_ticket_status") is True
+    assert accepts_ticket_id("ticketing_add_ticket_comment") is True
+    assert accepts_ticket_id("ticketing_get_ticket_status") is True
+
+
 def test_accepts_ticket_id_true_for_namespaced_tool_names():
     """The LLM plans using the gateway's namespaced names
     (identity_create_user, not bare create_user) — the allowlist check must
@@ -81,6 +95,26 @@ async def test_call_tool_for_ticket_does_not_inject_for_read_only_tool(monkeypat
     await _call_tool_for_ticket(42, "identity_get_user", {"username": "x"})
 
     assert "ticket_id" not in seen_args
+
+
+async def test_call_tool_for_ticket_injects_ticket_id_for_ticketing_tool(monkeypatch):
+    """The exact live scenario: an offboarding ticket's plan included
+    ticketing_add_ticket_comment with only {"comment": "..."} — no ticket_id
+    (the LLM never plans it; it's hidden via _EXECUTOR_INJECTED_ARGS), which
+    previously always failed FastMCP's arg validation since ticket_id is
+    required for this tool."""
+    seen_args = {}
+
+    class _FakeProxy:
+        async def call_tool(self, tool, args):
+            seen_args.update(args)
+            return '{"ok": true}'
+
+    monkeypatch.setattr("app.agent.graph.get_cached_proxy", lambda ticket_id: _FakeProxy())
+
+    await _call_tool_for_ticket(7, "ticketing_add_ticket_comment", {"comment": "offboarded"})
+
+    assert seen_args == {"comment": "offboarded", "ticket_id": 7}
 
 
 async def test_call_tool_for_ticket_does_not_override_an_explicit_ticket_id(monkeypatch):

@@ -368,15 +368,22 @@ async def _observe_user(username: str, ticket_id: int) -> str:
 # Args the execution layer injects itself — never something the LLM should
 # plan a value for. execute_step_node adds `approval_id` right before a
 # sensitive tool call (graph.py's own logic, not a planner decision).
-# `ticket_id` is now injected too, by _call_tool_for_ticket, for whichever
-# tools declare it (see app.mcp_server.tools.accepts_ticket_id) — for audit-
-# log attribution on create_user/disable_user/grant_access/revoke_access.
-# The two ticketing_* tools that REQUIRE it (add_ticket_comment,
-# get_ticket_status) still aren't referenced in any category prompt's
-# guidance, so they remain not plannable end-to-end today regardless of
-# what the discovered schema shows — wiring actual ticketing-tool usage
-# into the planner is a separate feature. Hiding ticket_id here (same as
-# approval_id) keeps the LLM from inventing a value for it either way.
+# `ticket_id` is injected by _call_tool_for_ticket for every tool in
+# app.mcp_server.tools.TOOLS_ACCEPTING_TICKET_ID — both the four identity/
+# access tools (optional param, for audit-log attribution) and the two
+# ticketing_* tools (REQUIRED param — add_ticket_comment/get_ticket_status
+# can't function at all without it).
+#
+# The ticketing tools still aren't referenced in any category prompt's
+# planning guidance, so the LLM can still spontaneously decide to plan one
+# via what discover_tool_reference() surfaces (confirmed live: an
+# offboarding ticket's plan included ticketing_add_ticket_comment
+# unprompted) — but now that ticket_id is actually injected, the call
+# succeeds instead of failing FastMCP's arg validation every time. Wiring
+# deliberate ticketing-tool usage into the planner's own guidance (rather
+# than "works if the LLM happens to plan it") is still a separate feature.
+# Hiding ticket_id here (same as approval_id) keeps the LLM from inventing
+# a value for it either way.
 _EXECUTOR_INJECTED_ARGS = {"approval_id", "ticket_id"}
 
 # Meta-tools exposed on the gateway that aren't planning targets themselves

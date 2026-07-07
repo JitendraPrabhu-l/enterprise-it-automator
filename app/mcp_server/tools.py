@@ -45,17 +45,29 @@ def strip_domain_prefix(tool_name: str) -> str:
     return tool_name
 
 
-# Mutating tools whose MCP function signature accepts an optional
-# ticket_id: int | None param for audit-log attribution (see each domain
-# server's @domain_mcp.tool() functions) — read-only tools (get_user) and
-# meta-tools (is_sensitive_action) do NOT accept it, and FastMCP rejects an
-# unexpected kwarg, so this must be an allowlist, not "inject into every
-# call." Previously nothing injected ticket_id at all (see graph.py's
-# execute_step_node) — every AuditLog row got written with ticket_id=NULL,
-# confirmed live against a real deployment's audit_log table. Kept in sync
-# with the domain servers' actual signatures by hand, same as
-# SENSITIVE_ACTIONS being hand-configured rather than introspected.
-TOOLS_ACCEPTING_TICKET_ID = {"create_user", "disable_user", "grant_access", "revoke_access"}
+# Tools whose MCP function signature accepts a ticket_id param — either
+# optional (create_user/disable_user/grant_access/revoke_access, for
+# audit-log attribution) or REQUIRED (add_ticket_comment/get_ticket_status,
+# app/mcp_server/ticketing_server.py — the whole point of those two tools
+# is acting on a specific ticket). Read-only/meta tools that don't accept
+# it at all (get_user, is_sensitive_action) are deliberately excluded, and
+# FastMCP rejects an unexpected kwarg, so this must be an allowlist, not
+# "inject into every call."
+#
+# add_ticket_comment/get_ticket_status were added to this set after a live
+# deployment bug: discover_tool_reference() (app/agent/graph.py) surfaces
+# every gateway tool to the planner, including these two — nothing stopped
+# the LLM from planning ticketing_add_ticket_comment even though no
+# category prompt ever tells it to, and when it did, the call failed
+# FastMCP's own arg validation every time (ticket_id is required, not
+# optional, and nothing supplied it). Previously only the four identity/
+# access tools were on this allowlist; kept in sync with the domain
+# servers' actual signatures by hand, same as SENSITIVE_ACTIONS being
+# hand-configured rather than introspected.
+TOOLS_ACCEPTING_TICKET_ID = {
+    "create_user", "disable_user", "grant_access", "revoke_access",
+    "add_ticket_comment", "get_ticket_status",
+}
 
 
 def accepts_ticket_id(tool_name: str) -> bool:
