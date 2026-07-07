@@ -32,6 +32,36 @@ DEPARTMENT_ACCESS_DEFAULTS: dict[str, list[str]] = {
 _DOMAIN_PREFIXES = ("identity_", "access_", "ticketing_")
 
 
+def strip_domain_prefix(tool_name: str) -> str:
+    """Strips a gateway domain prefix (identity_/access_/ticketing_) from a
+    namespaced tool name, if present — the bare name is what
+    SENSITIVE_ACTIONS and TOOLS_ACCEPTING_TICKET_ID are configured/defined
+    against, so callers holding either form (namespaced, from the LLM's
+    plan, or bare, e.g. in a test) get the same answer.
+    """
+    for prefix in _DOMAIN_PREFIXES:
+        if tool_name.startswith(prefix):
+            return tool_name[len(prefix):]
+    return tool_name
+
+
+# Mutating tools whose MCP function signature accepts an optional
+# ticket_id: int | None param for audit-log attribution (see each domain
+# server's @domain_mcp.tool() functions) — read-only tools (get_user) and
+# meta-tools (is_sensitive_action) do NOT accept it, and FastMCP rejects an
+# unexpected kwarg, so this must be an allowlist, not "inject into every
+# call." Previously nothing injected ticket_id at all (see graph.py's
+# execute_step_node) — every AuditLog row got written with ticket_id=NULL,
+# confirmed live against a real deployment's audit_log table. Kept in sync
+# with the domain servers' actual signatures by hand, same as
+# SENSITIVE_ACTIONS being hand-configured rather than introspected.
+TOOLS_ACCEPTING_TICKET_ID = {"create_user", "disable_user", "grant_access", "revoke_access"}
+
+
+def accepts_ticket_id(tool_name: str) -> bool:
+    return strip_domain_prefix(tool_name) in TOOLS_ACCEPTING_TICKET_ID
+
+
 def default_access_for_department(department: str) -> list[str]:
     return list(DEPARTMENT_ACCESS_DEFAULTS.get(department.strip().lower(), ["vpn"]))
 
@@ -74,12 +104,7 @@ async def _audit(
 
 
 def is_sensitive(tool_name: str) -> bool:
-    bare_name = tool_name
-    for prefix in _DOMAIN_PREFIXES:
-        if tool_name.startswith(prefix):
-            bare_name = tool_name[len(prefix):]
-            break
-    return bare_name in get_settings().sensitive_action_set
+    return strip_domain_prefix(tool_name) in get_settings().sensitive_action_set
 
 
 async def get_user(session: AsyncSession, username: str) -> dict:

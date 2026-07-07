@@ -64,7 +64,7 @@ from app.agent.state import AgentState, BatchStepInput
 from app.config import get_settings
 from app.db.session import session_scope
 from app.mcp_server.approval_gate import find_approved
-from app.mcp_server.tools import is_sensitive
+from app.mcp_server.tools import accepts_ticket_id, is_sensitive
 from app.observability import record_llm_call, trace_graph_node
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,22 @@ async def _call_tool_for_ticket(ticket_id: int, tool: str, args: dict) -> str:
     so a session shared across LangGraph's per-node tasks must be owned and
     accessed through a dedicated owner task + queue proxy (SessionProxy),
     not handed out directly — see mcp_session_cache.py for why.
+
+    Injects ticket_id into args for the tools whose MCP signature accepts it
+    (create_user/disable_user/grant_access/revoke_access — see
+    accepts_ticket_id) — this is the single chokepoint both
+    execute_step_node and execute_batch_step_node call through, so fixing it
+    here covers both. Previously nothing populated ticket_id at all (a
+    pre-existing, documented gap — see _EXECUTOR_INJECTED_ARGS' comment),
+    so every AuditLog row got written with ticket_id=NULL regardless of
+    which ticket actually triggered it; confirmed live against a real
+    deployment's audit_log table before this fix, and confirmed fixed by
+    the same query afterward. Allowlisted rather than injected
+    unconditionally: read-only/meta tools (get_user, is_sensitive_action)
+    don't accept ticket_id at all, and FastMCP rejects an unexpected kwarg.
     """
+    if accepts_ticket_id(tool) and "ticket_id" not in args:
+        args = {**args, "ticket_id": ticket_id}
     proxy = get_cached_proxy(ticket_id)
     if proxy is not None:
         return await proxy.call_tool(tool, args)
@@ -326,16 +341,15 @@ async def _observe_user(username: str, ticket_id: int) -> str:
 # Args the execution layer injects itself — never something the LLM should
 # plan a value for. execute_step_node adds `approval_id` right before a
 # sensitive tool call (graph.py's own logic, not a planner decision).
-# `ticket_id` is accepted by several tools for audit-log attribution in
-# app/mcp_server/tools.py, but — pre-existing, not introduced by this
-# filtering — nothing in execute_step_node actually populates it today, so
-# the two ticketing_* tools that REQUIRE it (add_ticket_comment,
-# get_ticket_status) are not currently plannable end-to-end regardless of
-# what the discovered schema shows; they also aren't referenced in any
-# category prompt's guidance today. Wiring ticket_id injection + actual
-# ticketing-tool usage into the planner is a separate feature, not part of
-# this discovery-phase fix — hiding ticket_id here at least keeps the LLM
-# from inventing a value for it, matching the approval_id treatment.
+# `ticket_id` is now injected too, by _call_tool_for_ticket, for whichever
+# tools declare it (see app.mcp_server.tools.accepts_ticket_id) — for audit-
+# log attribution on create_user/disable_user/grant_access/revoke_access.
+# The two ticketing_* tools that REQUIRE it (add_ticket_comment,
+# get_ticket_status) still aren't referenced in any category prompt's
+# guidance, so they remain not plannable end-to-end today regardless of
+# what the discovered schema shows — wiring actual ticketing-tool usage
+# into the planner is a separate feature. Hiding ticket_id here (same as
+# approval_id) keeps the LLM from inventing a value for it either way.
 _EXECUTOR_INJECTED_ARGS = {"approval_id", "ticket_id"}
 
 # Meta-tools exposed on the gateway that aren't planning targets themselves
