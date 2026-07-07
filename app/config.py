@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     api_port: int = 8000
     api_key: str = ""
 
+    # Optional public, low-privilege API key auto-seeded as a STANDARD
+    # ApiClient (see app/api/main.py's _ensure_demo_guest_client) and served
+    # unauthenticated from GET /demo-key so a public deployment's dashboard
+    # can auto-fill it for a stranger to try the app without you handing out
+    # a real credential. Left blank by default (no demo client is created,
+    # GET /demo-key returns null) — this is a deliberate opt-in, since it
+    # means a real, working credential is served to anyone who asks for it.
+    # Given a low daily_request_limit (see _ensure_demo_guest_client) since
+    # it's effectively public and shares your LLM provider's quota.
+    demo_api_key: str = ""
+
     # OTLP HTTP endpoint (e.g. a local Langfuse/Jaeger/collector instance).
     # Left blank by default — configure_observability() then leaves the
     # no-op tracer provider in place, so tracing calls throughout the app

@@ -154,6 +154,20 @@ Expect `{"ready":true,"checks":{"database":true,"checkpointer":true}}` — the s
 2. Add an HTTP monitor against `https://<your-app>.onrender.com/health`, 30s interval.
 3. This doubles as a keep-warm ping — Render's free tier sleeps after 15 minutes idle, and a monitor hitting it regularly reduces how often that happens.
 
+### Step 7 (optional) — Let strangers try it without a real key
+
+If you're sharing this link publicly (e.g. in a portfolio or with recruiters), set
+`DEMO_API_KEY` to a value **different from `API_KEY`** — generate one the same way:
+
+```
+python -c "import secrets; print(secrets.token_urlsafe(24))"
+```
+
+The dashboard then auto-fills this key for any visitor with no key of their own. It's
+seeded as a low-privilege client (can submit tickets and see only tickets it filed
+itself, capped at 10 requests/day) — never your real admin key. Leave `DEMO_API_KEY`
+unset to keep the dashboard requiring a real key from every visitor, as before.
+
 ### Full environment variable list
 
 | Variable | Required | Where it comes from |
@@ -164,5 +178,6 @@ Expect `{"ready":true,"checks":{"database":true,"checkpointer":true}}` — the s
 | `GROQ_API_KEY` | **required** | console.groq.com — a fresh key, not the one pasted earlier |
 | `LLM_PROVIDER` | defaulted in `render.yaml` | `groq` |
 | `MCP_SERVER_TOKEN` | not needed by default | only if `MCP_TRANSPORT` is switched to `http`; pre-generated in `.env.production` regardless |
-| `SENSITIVE_ACTIONS` | defaulted in `render.yaml` | `disable_user,revoke_access` |
+| `SENSITIVE_ACTIONS` | defaulted in `render.yaml` | `disable_user,revoke_access,create_user,grant_access` |
+| `DEMO_API_KEY` | optional | a fresh, separate value — see Step 7 above. Leave unset to disable public demo access |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | optional | leave blank — tracing stays a no-op |

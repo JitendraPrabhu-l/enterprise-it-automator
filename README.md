@@ -155,6 +155,13 @@ The built-in dashboard prompts for the key once (on first load) and stores it
 in `localStorage`. If `API_KEY` is left blank, auth is disabled and the server
 logs a warning at startup — only do this for a fully local, single-user demo.
 
+For a public deployment you want strangers to be able to try without asking
+you for a credential, set `DEMO_API_KEY` to a separate value — the dashboard
+auto-fills it for any visitor with no key of their own. It's seeded as a
+low-privilege client (can submit tickets, sees only tickets it filed itself,
+capped at 10 requests/day), never your real key. See `.env.example` and
+`DEPLOYMENT.md`.
+
 Seed a couple of mock employees and run the API:
 
 ```bash

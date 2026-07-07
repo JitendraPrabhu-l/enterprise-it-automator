@@ -36,6 +36,15 @@ services:
       - key: GROQ_API_KEY
         sync: false
 
+      # Optional: a separate, low-privilege key auto-served from GET /demo-key
+      # so a stranger can try the public dashboard without a real credential
+      # — see .env.example's DEMO_API_KEY comment. sync:false (not a plain
+      # `value:`) so it isn't accidentally left unset/generic — you still
+      # choose to opt in by setting a real value in the dashboard. Leave
+      # blank/unset entirely to disable the demo-key feature.
+      - key: DEMO_API_KEY
+        sync: false
+
       # --- Non-secret config, safe to commit ---
       - key: LLM_PROVIDER
         value: groq

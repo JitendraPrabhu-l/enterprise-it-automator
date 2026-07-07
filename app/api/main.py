@@ -76,6 +76,37 @@ async def _ensure_bootstrap_admin_client() -> None:
             session.add(ApiClient(name="bootstrap-admin", role=ApiClientRole.ADMIN, key=api_key))
 
 
+# A stranger trying the public demo has no way to obtain a real API key —
+# GET /demo-key (below) hands this one out on request, deliberately public.
+# A low daily cap keeps it from being a meaningful cost/abuse vector even
+# though the key itself is effectively public.
+DEMO_CLIENT_DAILY_REQUEST_LIMIT = 10
+
+
+async def _ensure_demo_guest_client() -> None:
+    """Ensures a real, low-privilege ApiClient row exists with
+    `key == settings.demo_api_key`, if configured — see Settings.demo_api_key
+    for why this is opt-in. STANDARD role: same ticket/audit/approval
+    read-scoping as any other non-admin client (only sees tickets it itself
+    filed), plus a much lower daily_request_limit than the default 100,
+    since this key is served to literally anyone who asks.
+    """
+    demo_key = get_settings().demo_api_key
+    if not demo_key:
+        return
+    async with session_scope() as session:
+        existing = await session.scalar(select(ApiClient).where(ApiClient.key == demo_key))
+        if existing is None:
+            session.add(
+                ApiClient(
+                    name="public-demo-guest",
+                    role=ApiClientRole.STANDARD,
+                    key=demo_key,
+                    daily_request_limit=DEMO_CLIENT_DAILY_REQUEST_LIMIT,
+                )
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not get_settings().api_key:
@@ -85,6 +116,7 @@ async def lifespan(app: FastAPI):
         )
     await init_db()
     await _ensure_bootstrap_admin_client()
+    await _ensure_demo_guest_client()
     sla_sweep_task = asyncio.create_task(sla_sweep_loop())
     yield
     sla_sweep_task.cancel()
@@ -165,6 +197,17 @@ async def ui() -> FileResponse:
     an unauthenticated visitor, not any ticket/employee/approval data.
     """
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/demo-key")
+async def demo_key() -> dict:
+    """Deliberately unauthenticated — hands out DEMO_API_KEY (if configured)
+    so a stranger trying the public dashboard doesn't need you to give them
+    a real credential first. See Settings.demo_api_key for why this is
+    opt-in and rate-capped. Returns {"api_key": null} if unconfigured; the
+    frontend then falls back to its normal "type your own key" behavior.
+    """
+    return {"api_key": get_settings().demo_api_key or None}
 
 
 async def _check_and_increment_daily_request_count(client: ApiClient | None) -> None:

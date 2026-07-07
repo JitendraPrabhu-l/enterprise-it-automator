@@ -92,6 +92,7 @@
       </div>
     </div>
   </div>
+  <div id="demoKeyNote" style="display:none; font-size:12px; color:var(--muted); margin-top:8px;"></div>
 </header>
 
 <main>
@@ -176,6 +177,9 @@ const apiKeyInput = document.getElementById("apiKeyInput");
 apiKeyInput.value = localStorage.getItem("apiKey") || "";
 apiKeyInput.addEventListener("input", () => {
   localStorage.setItem("apiKey", apiKeyInput.value);
+  // Once a visitor types their own key, stop treating this browser as
+  // "on the public demo key" — see autoFillDemoKeyIfAvailable below.
+  localStorage.setItem("apiKeyManuallySet", "1");
 });
 
 const reviewerInput = document.getElementById("reviewerInput");
@@ -183,6 +187,29 @@ reviewerInput.value = localStorage.getItem("reviewerToken") || "";
 reviewerInput.addEventListener("input", () => {
   localStorage.setItem("reviewerToken", reviewerInput.value);
 });
+
+async function autoFillDemoKeyIfAvailable() {
+  // Public portfolio deployments can opt into DEMO_API_KEY (see
+  // app/config.py) so a stranger can try the app without asking for a real
+  // credential first. Only auto-fills if this browser has never had a key
+  // typed into it manually — a visitor who pastes in their own real key
+  // must never have it silently overwritten by a later page load.
+  if (apiKeyInput.value || localStorage.getItem("apiKeyManuallySet")) return;
+  try {
+    const res = await fetch("/demo-key");
+    const data = await res.json();
+    if (data.api_key) {
+      apiKeyInput.value = data.api_key;
+      localStorage.setItem("apiKey", data.api_key);
+      const note = document.getElementById("demoKeyNote");
+      note.textContent = "Using the public read-only demo key — you can only see tickets you submit yourself. Approving/rejecting still needs a real reviewer token.";
+      note.style.display = "block";
+    }
+  } catch (e) {
+    // No demo key configured, or the request failed — the field just
+    // stays empty, same as before this existed.
+  }
+}
 
 async function api(path, opts) {
   opts = opts || {};
@@ -533,7 +560,7 @@ async function refreshAll() {
 }
 
 document.getElementById("empFilterActive").classList.add("active");
-refreshAll();
+autoFillDemoKeyIfAvailable().then(refreshAll);
 setInterval(refreshAll, 8000);
 </script>
 </body>
