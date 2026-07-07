@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
@@ -53,9 +54,34 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 async def init_db() -> None:
+    """Creates every table (and, on Postgres, the ENUM types they depend on)
+    if they don't already exist.
+
+    Postgres ENUM types are the one piece of this that isn't safely
+    idempotent under concurrent callers: SQLAlchemy's create_all checks
+    "does this type exist?" and then emits CREATE TYPE, but that check-then-
+    create isn't atomic. This app's Dockerfile runs 2 gunicorn workers, each
+    calling init_db() independently at startup — verified live against a
+    real Postgres (Neon) database that starting from a genuinely empty
+    schema, both workers' create_all calls race on the same CREATE TYPE
+    statement, and the loser crashes with IntegrityError (unique violation
+    on pg_type), taking the whole gunicorn master down with it
+    ("Worker failed to boot"). SQLite has no equivalent race (no ENUM
+    concept at the DB level), so this was invisible under local/SQLite-only
+    testing and only surfaced once this ran against Postgres for real.
+
+    The fix: treat "some other worker already created it" as success, not
+    failure. IntegrityError is a stable, driver-agnostic SQLAlchemy class
+    (unlike the underlying asyncpg/psycopg-specific exception types it
+    wraps), so this stays correct regardless of which Postgres driver is in
+    use without importing driver internals here.
+    """
     engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+    except IntegrityError:
+        pass
 
 
 @asynccontextmanager
