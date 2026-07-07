@@ -69,7 +69,11 @@ class Settings(BaseSettings):
     mcp_allowed_hosts: str = ""
     mcp_allowed_origins: str = ""
 
-    sensitive_actions: str = "disable_user,revoke_access"
+    # create_user/grant_access were added after a security review found they
+    # ran with zero human review — unlike disable_user/revoke_access, a
+    # prompt-injected or hallucinated planner output could provision access
+    # for the wrong (real) employee with nobody in the loop to catch it.
+    sensitive_actions: str = "disable_user,revoke_access,create_user,grant_access"
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000

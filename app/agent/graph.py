@@ -264,6 +264,33 @@ def _extract_json_array(text: str) -> list[dict]:
     return steps
 
 
+def _username_appears_in_ticket_text(username: str, ticket_subject: str, ticket_body: str) -> bool:
+    """Whether a planned tool call's target username shows up anywhere in
+    the ticket's own subject/body text (case-insensitive substring match).
+
+    Guards against a real gap found in security review: authorize_reviewer
+    (app/api/rbac.py) trusts approval.tool_args["username"] as ground truth
+    when scoping a manager's approval rights — it has no way to tell whether
+    that username actually matches what the ticket is about, versus a
+    prompt-injected or hallucinated redirect to a DIFFERENT real employee.
+    A manager reviewing their own report's approval would see a
+    correctly-scoped request and reasonably approve it without re-reading
+    the original ticket closely.
+
+    This is a substring match, not a hard gate — the ticket text is
+    free-form (a requester might write "jsmith" or "Jane Smith" or neither,
+    e.g. if the username was only decided during planning from context) so
+    a mismatch doesn't necessarily mean something is wrong. Surfaced to the
+    reviewer as a clear warning (see await_approval_node) rather than
+    blocking the approval outright, consistent with this project's existing
+    stance that a real HR/IdP system of record to verify identities against
+    is out of scope (see _USERNAME_PATTERN's comment) — the right-sized fix
+    is making a human notice, not a guess at ground truth server-side.
+    """
+    haystack = f"{ticket_subject}\n{ticket_body}".lower()
+    return username.lower() in haystack
+
+
 async def _extract_username(llm, ticket_text: str) -> str | None:
     response = await llm.ainvoke(
         [
@@ -544,11 +571,27 @@ async def await_approval_node(state: AgentState) -> dict:
     async with session_scope() as session:
         existing_pending = await session.get(Ticket, ticket_id)
         sla_minutes = get_settings().approval_sla_minutes
+        reasoning = step.get("reasoning", "")
+
+        target_username = step["args"].get("username")
+        if (
+            target_username
+            and existing_pending is not None
+            and not _username_appears_in_ticket_text(
+                str(target_username), existing_pending.subject, existing_pending.body
+            )
+        ):
+            reasoning = (
+                f"⚠ TARGET MISMATCH: {target_username!r} does not appear anywhere in this "
+                f"ticket's subject/body — verify this is really who the ticket is about "
+                f"before approving.\n{reasoning}"
+            )
+
         approval_row = Approval(
             ticket_id=ticket_id,
             tool_name=step["tool"],
             tool_args=step["args"],
-            reasoning=step.get("reasoning", ""),
+            reasoning=reasoning,
             status=ApprovalStatus.PENDING,
             sla_deadline=dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=sla_minutes),
         )

@@ -387,7 +387,7 @@ async function renderEmployees() {
       </div>
     `).join("");
   } catch (e) {
-    el.innerHTML = `<p class="empty">Failed to load employees: ${e.message}</p>`;
+    el.innerHTML = `<p class="empty">Failed to load employees: ${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -427,7 +427,7 @@ async function renderApprovals() {
       </div>
     `).join("");
   } catch (e) {
-    el.innerHTML = `<p class="empty">Failed to load approvals: ${e.message}</p>`;
+    el.innerHTML = `<p class="empty">Failed to load approvals: ${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -447,7 +447,7 @@ async function toggleAudit(ticketId, btn) {
       ? rows.map(r => `<div class="audit-row">${escapeHtml(r.created_at)} · <code class="tool">${escapeHtml(r.tool_name)}</code> · ${r.success ? "ok" : "FAILED"} · ${escapeHtml(r.result)}</div>`).join("")
       : `<p class="empty">No audit entries yet.</p>`;
   } catch (e) {
-    target.innerHTML = `<p class="empty">Failed to load audit log: ${e.message}</p>`;
+    target.innerHTML = `<p class="empty">Failed to load audit log: ${escapeHtml(e.message)}</p>`;
   }
 }
 
@@ -524,7 +524,7 @@ async function renderTickets() {
       </div>
     `).join("");
   } catch (e) {
-    el.innerHTML = `<p class="empty">Failed to load tickets: ${e.message}</p>`;
+    el.innerHTML = `<p class="empty">Failed to load tickets: ${escapeHtml(e.message)}</p>`;
   }
 }
 

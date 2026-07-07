@@ -123,6 +123,17 @@ def _patch_plan_node_passthrough(monkeypatch, plan: list):
 
 
 async def test_stream_ticket_run_emits_run_started_then_run_finished_success(monkeypatch):
+    """Pins SENSITIVE_ACTIONS to disable/revoke-only: grant_access joined
+    the app's real default sensitive set after a security review, but this
+    test is specifically about a step executing straight through (not
+    interrupted) — using a real sensitive tool here would test HITL
+    interrupt behavior instead, a different concern already covered by
+    test_stream_ticket_run_emits_interrupt_outcome_for_sensitive_step."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access")
+    get_settings.cache_clear()
+
     _patch_call_tool(monkeypatch)
     _patch_plan_node_passthrough(
         monkeypatch,
@@ -140,6 +151,13 @@ async def test_stream_ticket_run_emits_run_started_then_run_finished_success(mon
 
 
 async def test_stream_ticket_run_emits_tool_call_events_for_executed_step(monkeypatch):
+    """Pins SENSITIVE_ACTIONS the same way as the test above — see its
+    docstring for why."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access")
+    get_settings.cache_clear()
+
     _patch_call_tool(monkeypatch)
     _patch_plan_node_passthrough(
         monkeypatch,

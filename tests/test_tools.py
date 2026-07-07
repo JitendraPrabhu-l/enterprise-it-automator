@@ -89,19 +89,41 @@ async def test_revoke_access_not_granted_rejected(session):
         await t.revoke_access(session, "bwayne", "github:engineering")
 
 
-async def test_is_sensitive():
+async def test_is_sensitive(monkeypatch):
+    """create_user/grant_access were added to the default sensitive set
+    after a security review found they ran with zero human review — a
+    prompt-injected or hallucinated planner output could otherwise
+    provision access for the wrong real employee with nobody checking.
+
+    Explicitly sets SENSITIVE_ACTIONS and clears get_settings' cache rather
+    than relying on the .env default: other test modules (test_fanout.py,
+    test_replanning.py) legitimately monkeypatch SENSITIVE_ACTIONS to pin
+    their own scenarios, and since get_settings() is process-wide
+    @lru_cache'd, whichever test runs first in a session determines what
+    every later test sees unless each test that cares pins its own value.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access,create_user,grant_access")
+    get_settings.cache_clear()
+
     assert t.is_sensitive("disable_user") is True
     assert t.is_sensitive("revoke_access") is True
-    assert t.is_sensitive("grant_access") is False
-    assert t.is_sensitive("create_user") is False
+    assert t.is_sensitive("grant_access") is True
+    assert t.is_sensitive("create_user") is True
     assert t.is_sensitive("get_user") is False
 
 
-async def test_is_sensitive_strips_domain_namespace():
+async def test_is_sensitive_strips_domain_namespace(monkeypatch):
+    from app.config import get_settings
+
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access,create_user,grant_access")
+    get_settings.cache_clear()
+
     assert t.is_sensitive("identity_disable_user") is True
     assert t.is_sensitive("access_revoke_access") is True
-    assert t.is_sensitive("identity_create_user") is False
-    assert t.is_sensitive("access_grant_access") is False
+    assert t.is_sensitive("identity_create_user") is True
+    assert t.is_sensitive("access_grant_access") is True
     assert t.is_sensitive("ticketing_add_ticket_comment") is False
 
 

@@ -32,6 +32,13 @@ async def client(monkeypatch, tmp_path):
     import app.api.main as main_module
 
     await db_session_module.init_db()
+    # This fixture drives init_db() directly rather than through the app's
+    # actual lifespan (httpx.ASGITransport doesn't trigger it here), so the
+    # bootstrap ApiClient row lifespan would normally create from API_KEY
+    # (see app/api/main.py's _ensure_bootstrap_admin_client) has to be
+    # created explicitly too — otherwise "test-api-key" above has no
+    # matching ApiClient row and every request 401s.
+    await main_module._ensure_bootstrap_admin_client()
 
     transport = httpx.ASGITransport(app=main_module.app)
     async with httpx.AsyncClient(

@@ -1,34 +1,50 @@
-"""API key auth for endpoints that submit tickets, decide approvals, or expose
-approval/audit detail. Checked via a FastAPI dependency against the
-`X-API-Key` header.
+"""API client auth for endpoints that submit tickets, decide approvals, or
+expose approval/audit detail. Checked via a FastAPI dependency against the
+`X-API-Key` header, resolved to a real ApiClient row (app/db/models.py) —
+not just a bare string compare — so callers are distinguishable from each
+other (app/api/main.py's ticket/audit routes scope reads by which
+ApiClient made the request; see ApiClient's docstring for why this
+replaced the original single-shared-key design).
 
 If `API_KEY` is left unset in config (e.g. quick local demo runs), auth is
 disabled and a startup log warns loudly — this must be set before the API is
-reachable from anywhere but localhost.
+reachable from anywhere but localhost. When API_KEY IS set,
+app/api/main.py's lifespan ensures a bootstrap `admin` ApiClient row exists
+with `key == settings.api_key` before the app starts serving — so an
+existing deployment's X-API-Key keeps working unchanged after this
+migration, it's just backed by a real row instead of a bare string compare.
 """
 
-import hmac
 import logging
 
 from fastapi import Header, HTTPException
 from sqlalchemy import select
 
 from app.config import get_settings
-from app.db.models import Reviewer
+from app.db.models import ApiClient, Reviewer
 from app.db.session import session_scope
 
 logger = logging.getLogger(__name__)
 
 
-async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
+async def require_api_client(x_api_key: str | None = Header(default=None)) -> ApiClient | None:
+    """Returns the resolved ApiClient for the caller's X-API-Key, or None if
+    API_KEY is unset entirely (local demo mode — auth disabled, see the
+    module docstring). Route handlers that need to scope a read by caller
+    (GET /tickets/{id}, GET /tickets/{id}/audit, GET /approvals) must treat
+    a None return as "no scoping possible, demo mode already trusts
+    everyone" per that route's own docstring — never as "admin."
+    """
     settings = get_settings()
     if not settings.api_key:
-        return
-    # hmac.compare_digest, not `!=` — a plain string comparison short-
-    # circuits on the first differing byte, which is a (low-practicality
-    # but real) timing side channel on the one secret gating this whole API.
-    if x_api_key is None or not hmac.compare_digest(x_api_key, settings.api_key):
+        return None
+    if x_api_key is None:
         raise HTTPException(401, "Missing or invalid API key")
+    async with session_scope() as session:
+        client = await session.scalar(select(ApiClient).where(ApiClient.key == x_api_key))
+    if client is None:
+        raise HTTPException(401, "Missing or invalid API key")
+    return client
 
 
 async def require_reviewer_token(x_reviewer_token: str | None = Header(default=None)) -> Reviewer:

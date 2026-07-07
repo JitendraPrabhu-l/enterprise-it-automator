@@ -57,7 +57,19 @@ def _patch_plan_node_passthrough(monkeypatch, plan: list):
 async def test_fanout_batch_runs_concurrently_not_sequentially(monkeypatch):
     """3 steps at 0.3s each: sequential would take ~0.9s+, parallel should
     take close to 0.3s. A generous 0.7s ceiling leaves margin for test-env
-    overhead while still failing decisively if execution were sequential."""
+    overhead while still failing decisively if execution were sequential.
+
+    Pins SENSITIVE_ACTIONS to its original disable/revoke-only set —
+    grant_access was added to the app's real default sensitive set after a
+    security review (create_user/grant_access now require approval, same as
+    disable/revoke), but this test is about fan-out MECHANICS, not about
+    grant_access specifically, so it shouldn't be coupled to that policy
+    changing again in the future.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access")
+    get_settings.cache_clear()
     call_log = []
     _patch_slow_call_tool(monkeypatch, delay_seconds=0.3, call_log=call_log)
 
@@ -87,6 +99,12 @@ async def test_fanout_batch_runs_concurrently_not_sequentially(monkeypatch):
 
 
 async def test_fanout_batch_all_results_present_and_correct(monkeypatch):
+    """Pins SENSITIVE_ACTIONS the same way as the timing test above — see
+    its docstring for why."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access")
+    get_settings.cache_clear()
     call_log = []
     _patch_slow_call_tool(monkeypatch, delay_seconds=0.0, call_log=call_log)
 
@@ -122,12 +140,17 @@ async def test_mixed_plan_batches_non_sensitive_then_gates_sensitive_step(monkey
     silently write into whatever DB a previous test/run already initialized
     (verified this the hard way: an earlier version of this test wrote a
     stray Approval row into the real dev database).
+
+    Also pins SENSITIVE_ACTIONS to disable/revoke-only — see the timing
+    test above's docstring for why grant_access must NOT be treated as
+    sensitive here even though it now is in the app's real default config.
     """
     from app.config import get_settings
     from app.db import session as db_session_module
 
     db_path = tmp_path / "fanout_test.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access")
     get_settings.cache_clear()
     db_session_module._engine = None
     db_session_module._session_factory = None

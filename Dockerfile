@@ -38,8 +38,20 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # unlike "uvicorn --reload" (the README's local-dev-only run command, which
 # is a dev convenience flag that reloads on file changes and isn't meant to
 # run in a container).
+#
+# --workers 1, deliberately: slowapi's Limiter (app/api/main.py) uses the
+# default in-memory storage backend, which is per-process, not shared across
+# workers — with 2+ workers each independently allows the configured
+# request rate, so the REAL effective limit silently doubles (or more) with
+# every additional worker. A shared store (Redis) would let this scale back
+# up, but isn't part of this stack today — 1 worker is the simplest correct
+# fix rather than adding new infrastructure for a small-team-scale app. This
+# app's request handlers are I/O-bound (awaiting the LLM, the MCP gateway,
+# Postgres) rather than CPU-bound, so a single async worker still serves
+# many concurrent in-flight requests — it isn't the same limitation single-
+# threaded CPU-bound work would be.
 CMD ["gunicorn", "app.api.main:app", \
-     "--workers", "2", \
+     "--workers", "1", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--bind", "0.0.0.0:8000", \
      "--access-logfile", "-", \

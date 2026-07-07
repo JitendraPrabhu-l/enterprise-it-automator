@@ -137,7 +137,10 @@ def test_route_after_step_check_awaits_approval_for_sensitive_tool():
 
 
 def test_route_after_step_check_executes_non_sensitive_tool_directly():
-    state = {"plan": [{"tool": "grant_access", "args": {"username": "x", "resource": "vpn"}}], "plan_index": 0}
+    """add_ticket_comment, not grant_access — grant_access joined the
+    sensitive set after a security review found it ran with zero human
+    review (see is_sensitive's tests in test_tools.py)."""
+    state = {"plan": [{"tool": "add_ticket_comment", "args": {"ticket_id": 1, "comment": "note"}}], "plan_index": 0}
     assert route_after_step_check(state) == "execute_step"
 
 

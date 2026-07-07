@@ -34,6 +34,11 @@ def _default_reviewer_token() -> str:
     return secrets.token_urlsafe(24)
 
 
+def _default_api_client_key() -> str:
+    """Same rationale as _default_reviewer_token, for ApiClient.key."""
+    return secrets.token_urlsafe(32)
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -95,6 +100,50 @@ class Reviewer(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     role: Mapped[ReviewerRole] = mapped_column(Enum(ReviewerRole), default=ReviewerRole.MANAGER)
     token: Mapped[str] = mapped_column(String(64), unique=True, index=True, default=_default_reviewer_token)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ApiClientRole(str, enum.Enum):
+    ADMIN = "admin"
+    STANDARD = "standard"
+
+
+class ApiClient(Base):
+    """A caller of the HTTP API — replaces the single shared API_KEY string
+    compare with a real per-caller identity (Reviewer's pattern, applied to
+    the OUTER layer of auth). Added after a security review found that one
+    shared key meant "may submit tickets" was indistinguishable from "may
+    read every employee's audit trail/access history company-wide" —
+    app/api/main.py's list_approvals/get_ticket_audit routes previously had
+    no way to scope a read to "tickets THIS caller filed."
+
+    `admin` clients see everything (today's behavior, for the ops/reviewer
+    UI). `standard` clients may only read tickets/audit entries/approvals
+    for tickets where Ticket.requester matches their own `name` — see
+    app/api/main.py's scoping checks on GET /tickets/{id},
+    GET /tickets/{id}/audit, and GET /approvals.
+
+    `daily_request_count`/`request_count_reset_at` back a simple per-client
+    daily cap on POST /tickets (app/api/main.py) — a request-count budget,
+    not true LLM token accounting: attributing actual token spend to a
+    specific caller would require threading this identity through
+    AgentState/the LangGraph checkpointer (resumed across HITL pauses,
+    potentially hours later) and every LLM call site in app/agent/graph.py,
+    a substantially larger change than the auth/scoping work here. A
+    request-count cap bounds the same "one caller submits unbounded
+    maximum-length tickets in a loop" cost-amplification pattern the
+    security review flagged, without that plumbing.
+    """
+
+    __tablename__ = "api_clients"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    role: Mapped[ApiClientRole] = mapped_column(Enum(ApiClientRole), default=ApiClientRole.STANDARD)
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True, default=_default_api_client_key)
+    daily_request_limit: Mapped[int] = mapped_column(default=100)
+    daily_request_count: Mapped[int] = mapped_column(default=0)
+    request_count_reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

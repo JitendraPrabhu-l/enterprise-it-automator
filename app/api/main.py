@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import datetime as dt
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from sqlalchemy import select, text
 from app.agent.ag_ui_bridge import stream_resume_run, stream_ticket_run
 from app.agent.runner import resume_ticket_run, start_ticket_run
 from app.agent.sla_sweep import run_sla_sweep, sla_sweep_loop
-from app.api.auth import require_api_key, require_reviewer_token
+from app.api.auth import require_api_client, require_reviewer_token
 from app.api.idempotency import get_cached_response, store_response
 from app.api.rbac import ApprovalNotAuthorizedError, authorize_reviewer
 from app.api.schemas import (
@@ -31,6 +32,8 @@ from app.api.schemas import (
 )
 from app.config import get_settings
 from app.db.models import (
+    ApiClient,
+    ApiClientRole,
     Approval,
     ApprovalStatus,
     AuditLog,
@@ -57,6 +60,22 @@ logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address)
 
 
+async def _ensure_bootstrap_admin_client() -> None:
+    """Ensures a real ApiClient row exists with `key == settings.api_key`,
+    so an existing deployment's X-API-Key keeps working unchanged after the
+    migration off the old bare-string-compare design — an admin client is
+    created automatically here rather than requiring db/seed.py to be run
+    manually before the app can serve its first authenticated request.
+    """
+    api_key = get_settings().api_key
+    if not api_key:
+        return
+    async with session_scope() as session:
+        existing = await session.scalar(select(ApiClient).where(ApiClient.key == api_key))
+        if existing is None:
+            session.add(ApiClient(name="bootstrap-admin", role=ApiClientRole.ADMIN, key=api_key))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not get_settings().api_key:
@@ -65,6 +84,7 @@ async def lifespan(app: FastAPI):
             "UNAUTHENTICATED. Set API_KEY in .env before exposing this beyond localhost."
         )
     await init_db()
+    await _ensure_bootstrap_admin_client()
     sla_sweep_task = asyncio.create_task(sla_sweep_loop())
     yield
     sla_sweep_task.cancel()
@@ -133,7 +153,7 @@ async def ready() -> JSONResponse:
 
 @app.get("/")
 async def ui() -> FileResponse:
-    """Intentionally NOT behind require_api_key: this serves only the
+    """Intentionally NOT behind require_api_client: this serves only the
     static HTML/CSS/JS shell (no data, no secrets) — the page itself is
     where a visitor enters their API key/reviewer token before any actual
     data-fetching call is made. Since a plain browser navigation can't
@@ -147,10 +167,57 @@ async def ui() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
-@app.post("/tickets", response_model=RunResult, dependencies=[Depends(require_api_key)])
+async def _check_and_increment_daily_request_count(client: ApiClient | None) -> None:
+    """Bounds sustained LLM cost per caller — a security review found that
+    with only a per-minute rate limit, one ApiClient could still sustain
+    substantial ongoing LLM spend indefinitely (max-length ticket bodies,
+    repeated in a loop, at the per-minute cap, forever). This is a request-
+    COUNT budget, not true token accounting: attributing actual token spend
+    to a specific caller would require threading ApiClient identity through
+    AgentState/the LangGraph checkpointer (resumed across HITL pauses,
+    potentially hours later) and every LLM call site in app/agent/graph.py —
+    a substantially larger change than this. A daily request cap bounds the
+    same abuse pattern without that plumbing.
+
+    No-op if client is None (API_KEY unset — local demo mode already trusts
+    everyone; nothing to attribute a per-caller budget to).
+    """
+    if client is None:
+        return
+    now = dt.datetime.now(dt.timezone.utc)
+    async with session_scope() as session:
+        row = await session.get(ApiClient, client.id)
+        if row is None:
+            return
+        # SQLite (via aiosqlite) doesn't reliably round-trip tzinfo on
+        # DateTime(timezone=True) columns the way Postgres does — a value
+        # written as timezone-aware can come back naive, which raises
+        # TypeError on subtraction against `now`. Assume UTC (everything
+        # this app writes to this column already is) rather than compare
+        # inside a SQL WHERE clause the way sla_sweep.py does, since this
+        # check is a single-row lookup by primary key, not a query.
+        reset_at = row.request_count_reset_at
+        if reset_at.tzinfo is None:
+            reset_at = reset_at.replace(tzinfo=dt.timezone.utc)
+        if now - reset_at > dt.timedelta(days=1):
+            row.daily_request_count = 0
+            row.request_count_reset_at = now
+        if row.daily_request_count >= row.daily_request_limit:
+            raise HTTPException(
+                429,
+                f"Daily request limit ({row.daily_request_limit}/day) reached for this API client. "
+                "Try again after the daily reset.",
+            )
+        row.daily_request_count += 1
+
+
+@app.post("/tickets", response_model=RunResult)
 @limiter.limit("20/minute")
 async def submit_ticket(
-    request: Request, payload: TicketCreate, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")
+    request: Request,
+    payload: TicketCreate,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    client: ApiClient | None = Depends(require_api_client),
 ) -> RunResult:
     """Creates a ticket and immediately runs the agent on it up to the first
     HITL interrupt (or completion, if no sensitive actions are needed).
@@ -159,6 +226,7 @@ async def submit_ticket(
     exact request body, replays the stored response instead of creating a
     duplicate ticket and re-running the agent graph.
     """
+    await _check_and_increment_daily_request_count(client)
     payload_dict = payload.model_dump()
 
     if idempotency_key:
@@ -188,9 +256,11 @@ async def submit_ticket(
     return RunResult(**result)
 
 
-@app.post("/tickets/stream", dependencies=[Depends(require_api_key)])
+@app.post("/tickets/stream")
 @limiter.limit("20/minute")
-async def submit_ticket_stream(request: Request, payload: TicketCreate) -> StreamingResponse:
+async def submit_ticket_stream(
+    request: Request, payload: TicketCreate, client: ApiClient | None = Depends(require_api_client)
+) -> StreamingResponse:
     """AG-UI-protocol streaming counterpart to POST /tickets (see
     app/agent/ag_ui_bridge.py): creates the ticket the same way, then
     streams RUN_STARTED/STEP_*/TOOL_CALL_*/STATE_DELTA/RUN_FINISHED events
@@ -201,6 +271,7 @@ async def submit_ticket_stream(request: Request, payload: TicketCreate) -> Strea
     make sense the way replaying a cached final JSON result does; a client
     that needs idempotent ticket submission should use POST /tickets.
     """
+    await _check_and_increment_daily_request_count(client)
     async with session_scope() as session:
         ticket = Ticket(
             requester=payload.requester,
@@ -223,27 +294,43 @@ async def submit_ticket_stream(request: Request, payload: TicketCreate) -> Strea
     return StreamingResponse(event_source(), media_type=encoder.get_content_type())
 
 
-@app.get("/tickets", response_model=list[TicketOut], dependencies=[Depends(require_api_key)])
-async def list_tickets() -> list[Ticket]:
+def _client_may_see_ticket(client: ApiClient | None, ticket: Ticket) -> bool:
+    """Whether client may read this specific ticket (and, by extension, its
+    approvals/audit entries). None (API_KEY unset, local demo mode) and
+    ADMIN clients see everything, matching this app's pre-existing
+    behavior for a small-team ops setup. A STANDARD client may only see
+    tickets they themselves filed — closes a security-review finding: the
+    single shared API key previously meant "may submit tickets" was
+    indistinguishable from "may read every employee's audit trail/access
+    history company-wide," since these reads had no caller-scoping at all.
+    """
+    if client is None or client.role == ApiClientRole.ADMIN:
+        return True
+    return ticket.requester == client.name
+
+
+@app.get("/tickets", response_model=list[TicketOut])
+async def list_tickets(client: ApiClient | None = Depends(require_api_client)) -> list[Ticket]:
     async with session_scope() as session:
-        rows = await session.scalars(select(Ticket).order_by(Ticket.created_at.desc()))
+        query = select(Ticket).order_by(Ticket.created_at.desc())
+        if client is not None and client.role != ApiClientRole.ADMIN:
+            query = query.where(Ticket.requester == client.name)
+        rows = await session.scalars(query)
         return list(rows)
 
 
-@app.get(
-    "/tickets/{ticket_id}", response_model=TicketOut, dependencies=[Depends(require_api_key)]
-)
-async def get_ticket(ticket_id: int) -> Ticket:
+@app.get("/tickets/{ticket_id}", response_model=TicketOut)
+async def get_ticket(ticket_id: int, client: ApiClient | None = Depends(require_api_client)) -> Ticket:
     async with session_scope() as session:
         ticket = await session.get(Ticket, ticket_id)
         if ticket is None:
             raise HTTPException(404, f"No such ticket: {ticket_id}")
+        if not _client_may_see_ticket(client, ticket):
+            raise HTTPException(404, f"No such ticket: {ticket_id}")
         return ticket
 
 
-@app.get(
-    "/employees", response_model=list[EmployeeOut], dependencies=[Depends(require_api_key)]
-)
+@app.get("/employees", response_model=list[EmployeeOut], dependencies=[Depends(require_api_client)])
 async def list_employees(status: str | None = None) -> list[EmployeeUser]:
     """Current (active) and past (disabled) employees in the mock identity store."""
     async with session_scope() as session:
@@ -257,19 +344,17 @@ async def list_employees(status: str | None = None) -> list[EmployeeUser]:
         return list(rows)
 
 
-@app.get(
-    "/approvals", response_model=list[ApprovalOut], dependencies=[Depends(require_api_key)]
-)
-async def list_approvals(status: str | None = None) -> list[Approval]:
-    """Read-only visibility, intentionally NOT scoped by reviewer/manager
-    relationship — this is a small-team ops dashboard, not a multi-tenant
-    system, and anyone with the shared API key can see every approval
-    regardless of who it targets. The real authorization boundary is who
-    may DECIDE an approval, which IS scoped (require_reviewer_token +
-    app/api/rbac.py's manager-relationship check on
-    POST /approvals/{id}/decide). If this app grows into something where
-    read-visibility itself needs to be restricted per-reviewer, that would
-    be a deliberate follow-up, not an oversight being silently left here.
+@app.get("/approvals", response_model=list[ApprovalOut])
+async def list_approvals(
+    status: str | None = None, client: ApiClient | None = Depends(require_api_client)
+) -> list[Approval]:
+    """Read-only visibility, scoped to STANDARD clients' own tickets — see
+    _client_may_see_ticket. ADMIN clients (and API_KEY-unset local demo
+    mode) still see every approval regardless of who it targets, as before
+    for a small-team ops dashboard use case. The real authorization
+    boundary for DECIDING an approval was already scoped separately
+    (require_reviewer_token + app/api/rbac.py's manager-relationship check
+    on POST /approvals/{id}/decide) — this only closes the READ side.
     """
     async with session_scope() as session:
         query = select(Approval).order_by(Approval.created_at.desc())
@@ -278,6 +363,8 @@ async def list_approvals(status: str | None = None) -> list[Approval]:
                 query = query.where(Approval.status == ApprovalStatus(status))
             except ValueError:
                 raise HTTPException(400, f"Invalid status: {status!r}")
+        if client is not None and client.role != ApiClientRole.ADMIN:
+            query = query.join(Ticket, Approval.ticket_id == Ticket.id).where(Ticket.requester == client.name)
         rows = await session.scalars(query)
         return list(rows)
 
@@ -285,7 +372,7 @@ async def list_approvals(status: str | None = None) -> list[Approval]:
 @app.post(
     "/approvals/{approval_id}/decide",
     response_model=RunResult,
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_api_client)],
 )
 @limiter.limit("20/minute")
 async def decide_approval(
@@ -344,7 +431,7 @@ async def decide_approval(
 
 @app.post(
     "/approvals/{approval_id}/decide/stream",
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_api_client)],
 )
 @limiter.limit("20/minute")
 async def decide_approval_stream(
@@ -411,19 +498,21 @@ async def decide_approval_stream(
     return StreamingResponse(event_source(), media_type=encoder.get_content_type())
 
 
-@app.get(
-    "/tickets/{ticket_id}/audit",
-    response_model=list[AuditLogOut],
-    dependencies=[Depends(require_api_key)],
-)
-async def get_ticket_audit(ticket_id: int) -> list[AuditLog]:
-    """Read-only, intentionally NOT scoped by reviewer relationship — see
-    list_approvals' docstring above for why: this is a small-team ops
-    dashboard's audit trail, not a per-tenant restricted view, and the real
-    authorization boundary (who may DECIDE a sensitive action) is enforced
-    elsewhere.
+@app.get("/tickets/{ticket_id}/audit", response_model=list[AuditLogOut])
+async def get_ticket_audit(
+    ticket_id: int, client: ApiClient | None = Depends(require_api_client)
+) -> list[AuditLog]:
+    """Scoped to STANDARD clients' own tickets — see _client_may_see_ticket.
+    ADMIN clients (and API_KEY-unset local demo mode) still see every
+    ticket's audit trail, as before. Previously this had no caller-scoping
+    at all — a security review flagged that failure text and raw tool_args
+    (target usernames, resource names) here were readable by any API-key
+    holder for any ticket, not just the one they filed themselves.
     """
     async with session_scope() as session:
+        ticket = await session.get(Ticket, ticket_id)
+        if ticket is None or not _client_may_see_ticket(client, ticket):
+            raise HTTPException(404, f"No such ticket: {ticket_id}")
         rows = await session.scalars(
             select(AuditLog).where(AuditLog.ticket_id == ticket_id).order_by(AuditLog.created_at)
         )
@@ -433,12 +522,20 @@ async def get_ticket_audit(ticket_id: int) -> list[AuditLog]:
 @app.post(
     "/admin/sla-sweep",
     response_model=SlaSweepResult,
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_api_client)],
 )
-async def trigger_sla_sweep() -> SlaSweepResult:
+@limiter.limit("10/minute")
+async def trigger_sla_sweep(request: Request) -> SlaSweepResult:
     """Runs one SLA sweep pass on demand — the same logic the background
     loop runs every `SLA_SWEEP_INTERVAL_SECONDS`, exposed here for ops
     visibility/testing without waiting for the next scheduled pass.
+
+    Rate-limited (unlike being left unbounded) because each call runs three
+    full-table scans (overdue approvals, stuck tickets, expired idempotency
+    keys) and writes a fresh audit-log row for every already-overdue item it
+    finds again — an unthrottled loop against this endpoint would drive
+    sustained DB load and unbounded audit-table growth for no operational
+    benefit, since the background loop already covers routine sweeping.
     """
     result = await run_sla_sweep()
     return SlaSweepResult(**result)

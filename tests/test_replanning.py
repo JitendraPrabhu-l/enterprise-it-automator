@@ -69,13 +69,21 @@ class _ScriptedLLM:
 async def test_replan_triggers_after_stale_plan_failure_and_completes(monkeypatch):
     """First plan step (create_user) fails because the user turned out to
     already exist (stale assumption — e.g. created by a concurrent ticket
-    between planning and execution). Uses a non-sensitive tool deliberately:
-    a sensitive first step would route through await_approval and never
-    reach execute_step without a real approval, which is a different
-    concern (HITL) than what this test is verifying (replan-on-failure).
+    between planning and execution). Pins SENSITIVE_ACTIONS to its original
+    disable/revoke-only set deliberately: create_user/grant_access joined
+    the app's real default sensitive set after a security review, but a
+    sensitive first step would route through await_approval and never reach
+    execute_step without a real approval, which is a different concern
+    (HITL) than what this test is verifying (replan-on-failure) — so this
+    test pins its own policy rather than assume today's default forever.
     Replan should kick in, and the new plan (just a grant_access) should
     execute successfully."""
     import json
+
+    from app.config import get_settings
+
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access")
+    get_settings.cache_clear()
 
     _patch_mcp(
         monkeypatch,
@@ -128,10 +136,17 @@ async def test_replan_triggers_after_stale_plan_failure_and_completes(monkeypatc
 
 async def test_replan_budget_prevents_infinite_loop(monkeypatch):
     """A pathological case where every replan attempt produces another
-    stale-shaped failure must stop after MAX_REPLANS, not loop forever."""
+    stale-shaped failure must stop after MAX_REPLANS, not loop forever.
+
+    Pins SENSITIVE_ACTIONS the same way as the test above — see its
+    docstring for why create_user must stay non-sensitive here."""
     import json
 
     from app.agent.graph import MAX_REPLANS
+    from app.config import get_settings
+
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access")
+    get_settings.cache_clear()
 
     call_count = {"n": 0}
 
