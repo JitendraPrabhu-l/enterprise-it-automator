@@ -16,10 +16,22 @@ def _ensure_sqlite_dir_exists(database_url: str) -> None:
     """SQLite (via aiosqlite) does not auto-create the parent directory of its
     file — only the file itself — so a fresh checkout without data/ present
     would fail on first run with 'unable to open database file'.
+
+    Strips exactly ONE leading slash (the sqlite:/// URL syntax's own
+    separator), not all of them — a relative-path URL
+    ("sqlite+aiosqlite:///./data/x.db") parses to path "/./data/x.db" (one
+    leading slash to strip), but an absolute-path URL
+    ("sqlite+aiosqlite:////tmp/x.db", four slashes) parses to path
+    "//tmp/x.db" (two leading slashes: the URL separator, then the path's
+    own leading "/"). `.lstrip("/")` would strip BOTH in the absolute case,
+    silently turning "/tmp/x.db" into the relative path "tmp/x.db" — caught
+    live via CI running on Linux (pytest's tmp_path fixture produces
+    absolute POSIX paths); Windows paths never hit this because they don't
+    start with "/" the same way.
     """
     if not database_url.startswith("sqlite"):
         return
-    db_path = urlparse(database_url).path.lstrip("/")
+    db_path = urlparse(database_url).path.removeprefix("/")
     if db_path and db_path != ":memory:":
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
