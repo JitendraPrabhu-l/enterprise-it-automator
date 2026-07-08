@@ -119,9 +119,11 @@ class ApiClient(Base):
 
     `admin` clients see everything (today's behavior, for the ops/reviewer
     UI). `standard` clients may only read tickets/audit entries/approvals
-    for tickets where Ticket.requester matches their own `name` — see
-    app/api/main.py's scoping checks on GET /tickets/{id},
-    GET /tickets/{id}/audit, and GET /approvals.
+    they themselves submitted, scoped by Ticket.submitted_by_client_id (NOT
+    Ticket.requester, a free-text field the caller controls — see
+    Ticket.submitted_by_client_id's docstring for why that distinction is
+    load-bearing) — see app/api/main.py's scoping checks on
+    GET /tickets/{id}, GET /tickets/{id}/audit, and GET /approvals.
 
     `daily_request_count`/`request_count_reset_at` back a simple per-client
     daily cap on POST /tickets (app/api/main.py) — a request-count budget,
@@ -144,6 +146,15 @@ class ApiClient(Base):
     daily_request_limit: Mapped[int] = mapped_column(default=100)
     daily_request_count: Mapped[int] = mapped_column(default=0)
     request_count_reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # A DIFFERENT concern from request_count_reset_at above, despite the
+    # similar shape: that field tracks the daily REQUEST-COUNT budget
+    # resetting; this one tracks when this client's own tickets/approvals/
+    # audit entries were last hard-deleted (app/agent/demo_purge.py) — "the
+    # public demo resets every day" so its data doesn't accumulate forever
+    # alongside real tickets. Nullable because most ApiClients (every real
+    # one) never have this purge run against them at all — it's currently
+    # only ever invoked for the one DEMO_API_KEY-seeded client.
+    data_last_purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -168,6 +168,12 @@ seeded as a low-privilege client (can submit tickets and see only tickets it fil
 itself, capped at 10 requests/day) — never your real admin key. Leave `DEMO_API_KEY`
 unset to keep the dashboard requiring a real key from every visitor, as before.
 
+Demo tickets/approvals/audit entries are hard-deleted once a day (`DEMO_DATA_RESET_HOURS`,
+default 24h) so public demo traffic never accumulates alongside your real data — they're
+also hidden from your admin key's default `/tickets` and `/approvals` view (pass
+`?include_demo=true` to see them). To force a reset immediately instead of waiting for the
+daily sweep, `POST /admin/demo-reset` with your admin `API_KEY`.
+
 ### Full environment variable list
 
 | Variable | Required | Where it comes from |
@@ -180,4 +186,5 @@ unset to keep the dashboard requiring a real key from every visitor, as before.
 | `MCP_SERVER_TOKEN` | not needed by default | only if `MCP_TRANSPORT` is switched to `http`; pre-generated in `.env.production` regardless |
 | `SENSITIVE_ACTIONS` | defaulted in `render.yaml` | `disable_user,revoke_access,create_user,grant_access` |
 | `DEMO_API_KEY` | optional | a fresh, separate value — see Step 7 above. Leave unset to disable public demo access |
+| `DEMO_DATA_RESET_HOURS` | optional | defaults to `24` — how often the demo client's own tickets/approvals/audit entries are hard-deleted. No effect if `DEMO_API_KEY` is unset |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | optional | leave blank — tracing stays a no-op |

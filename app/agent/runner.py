@@ -93,6 +93,17 @@ async def resume_ticket_run(ticket_id: int) -> dict:
     return await _summarize(graph, ticket_id, result, config)
 
 
+async def delete_ticket_thread(ticket_id: int) -> None:
+    """Deletes a ticket's LangGraph checkpoint state entirely — used by
+    app/agent/demo_purge.py when hard-deleting a demo ticket from the app
+    DB, so its checkpoint rows (a separate store from the app DB, keyed by
+    thread_id = f"ticket-{ticket_id}") don't accumulate forever as an
+    orphaned leak once the app-DB Ticket row they belong to is gone.
+    """
+    graph = await _get_graph()
+    await graph.checkpointer.adelete_thread(f"ticket-{ticket_id}")
+
+
 async def _summarize(graph, ticket_id: int, result: dict, config: dict) -> dict:
     snapshot = await graph.aget_state(config)
     interrupts = getattr(snapshot, "interrupts", None) or ()

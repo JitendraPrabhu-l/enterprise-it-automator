@@ -107,6 +107,16 @@ class Settings(BaseSettings):
     approval_sla_minutes: int = 60
     sla_sweep_interval_seconds: int = 300
 
+    # How often the public demo client's own tickets/approvals/audit
+    # entries are hard-deleted (app/agent/demo_purge.py) — "resets each
+    # day" for the public demo so its tickets don't accumulate forever
+    # alongside real ones. Only ever touches rows with
+    # Ticket.submitted_by_client_id == the demo ApiClient's id; never runs
+    # at all if DEMO_API_KEY is unset. Default 24h, not tied to
+    # SLA_SWEEP_INTERVAL_SECONDS — a demo reset cadence and an approval-SLA
+    # cadence are different concerns that happen to both be periodic sweeps.
+    demo_data_reset_hours: int = 24
+
     @property
     def sensitive_action_set(self) -> set[str]:
         return {a.strip() for a in self.sensitive_actions.split(",") if a.strip()}

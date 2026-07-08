@@ -15,6 +15,7 @@ from slowapi.util import get_remote_address
 from sqlalchemy import select, text
 
 from app.agent.ag_ui_bridge import stream_resume_run, stream_ticket_run
+from app.agent.demo_purge import demo_purge_loop, reset_demo_data_if_due
 from app.agent.runner import resume_ticket_run, start_ticket_run
 from app.agent.sla_sweep import run_sla_sweep, sla_sweep_loop
 from app.api.auth import require_api_client, require_reviewer_token
@@ -24,6 +25,7 @@ from app.api.schemas import (
     ApprovalDecision,
     ApprovalOut,
     AuditLogOut,
+    DemoResetResult,
     EmployeeOut,
     RunResult,
     SlaSweepResult,
@@ -118,10 +120,14 @@ async def lifespan(app: FastAPI):
     await _ensure_bootstrap_admin_client()
     await _ensure_demo_guest_client()
     sla_sweep_task = asyncio.create_task(sla_sweep_loop())
+    demo_purge_task = asyncio.create_task(demo_purge_loop())
     yield
     sla_sweep_task.cancel()
+    demo_purge_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await sla_sweep_task
+    with contextlib.suppress(asyncio.CancelledError):
+        await demo_purge_task
     from app.agent import runner
 
     if runner._checkpointer_cm is not None:
@@ -366,12 +372,46 @@ def _client_may_see_ticket(client: ApiClient | None, ticket: Ticket) -> bool:
     return ticket.submitted_by_client_id == client.id
 
 
+async def _demo_client_id(session) -> int | None:
+    """The public demo ApiClient's id, if DEMO_API_KEY is configured —
+    used to keep its own tickets/approvals out of ADMIN's default view
+    (see list_tickets/list_approvals' include_demo param) so the ops
+    dashboard isn't cluttered with public demo traffic day to day, on top
+    of the daily hard-delete app/agent/demo_purge.py already does. Cheap to
+    just query every time (one indexed lookup) rather than caching — this
+    project has no cache-invalidation story and demo config essentially
+    never changes at runtime.
+    """
+    demo_key = get_settings().demo_api_key
+    if not demo_key:
+        return None
+    demo_client = await session.scalar(select(ApiClient).where(ApiClient.key == demo_key))
+    return demo_client.id if demo_client is not None else None
+
+
 @app.get("/tickets", response_model=list[TicketOut])
-async def list_tickets(client: ApiClient | None = Depends(require_api_client)) -> list[Ticket]:
+async def list_tickets(
+    include_demo: bool = False, client: ApiClient | None = Depends(require_api_client)
+) -> list[Ticket]:
+    """`include_demo=true` reveals the public demo client's own tickets in
+    an ADMIN's view (hidden by default — see _demo_client_id) — for a
+    STANDARD client this param has no effect, since it can only ever see
+    its own tickets regardless."""
     async with session_scope() as session:
         query = select(Ticket).order_by(Ticket.created_at.desc())
         if client is not None and client.role != ApiClientRole.ADMIN:
             query = query.where(Ticket.submitted_by_client_id == client.id)
+        elif not include_demo:
+            demo_id = await _demo_client_id(session)
+            if demo_id is not None:
+                # IS DISTINCT FROM, not !=: plain != excludes NULL rows too
+                # under standard SQL three-valued logic (NULL != x is NULL,
+                # not TRUE) — pre-existing tickets from before
+                # submitted_by_client_id existed (or any future row with no
+                # attributable client) have NULL here and must still show
+                # up in the default admin view; only the demo client's OWN
+                # rows should be hidden.
+                query = query.where(Ticket.submitted_by_client_id.is_distinct_from(demo_id))
         rows = await session.scalars(query)
         return list(rows)
 
@@ -403,15 +443,20 @@ async def list_employees(status: str | None = None) -> list[EmployeeUser]:
 
 @app.get("/approvals", response_model=list[ApprovalOut])
 async def list_approvals(
-    status: str | None = None, client: ApiClient | None = Depends(require_api_client)
+    status: str | None = None,
+    include_demo: bool = False,
+    client: ApiClient | None = Depends(require_api_client),
 ) -> list[Approval]:
     """Read-only visibility, scoped to STANDARD clients' own tickets — see
     _client_may_see_ticket. ADMIN clients (and API_KEY-unset local demo
-    mode) still see every approval regardless of who it targets, as before
-    for a small-team ops dashboard use case. The real authorization
-    boundary for DECIDING an approval was already scoped separately
-    (require_reviewer_token + app/api/rbac.py's manager-relationship check
-    on POST /approvals/{id}/decide) — this only closes the READ side.
+    mode) still see every OTHER approval regardless of who it targets, as
+    before for a small-team ops dashboard use case — except the public demo
+    client's own approvals, hidden by default the same way as
+    list_tickets's include_demo (pass include_demo=true to reveal them).
+    The real authorization boundary for DECIDING an approval was already
+    scoped separately (require_reviewer_token + app/api/rbac.py's manager-
+    relationship check on POST /approvals/{id}/decide) — this only closes
+    the READ side.
     """
     async with session_scope() as session:
         query = select(Approval).order_by(Approval.created_at.desc())
@@ -424,6 +469,14 @@ async def list_approvals(
             query = query.join(Ticket, Approval.ticket_id == Ticket.id).where(
                 Ticket.submitted_by_client_id == client.id
             )
+        elif not include_demo:
+            demo_id = await _demo_client_id(session)
+            if demo_id is not None:
+                # IS DISTINCT FROM — see list_tickets's identical comment
+                # for why plain != would incorrectly hide NULL-owned rows.
+                query = query.join(Ticket, Approval.ticket_id == Ticket.id).where(
+                    Ticket.submitted_by_client_id.is_distinct_from(demo_id)
+                )
         rows = await session.scalars(query)
         return list(rows)
 
@@ -598,3 +651,25 @@ async def trigger_sla_sweep(request: Request) -> SlaSweepResult:
     """
     result = await run_sla_sweep()
     return SlaSweepResult(**result)
+
+
+@app.post("/admin/demo-reset", response_model=DemoResetResult)
+@limiter.limit("10/minute")
+async def trigger_demo_reset(
+    request: Request, client: ApiClient | None = Depends(require_api_client)
+) -> DemoResetResult:
+    """Runs one demo-data-reset pass on demand — the same check the
+    background loop runs every hour (app/agent/demo_purge.py), exposed here
+    for ops visibility/testing without waiting for it to become due on its
+    own. A no-op (0 purged) if DEMO_API_KEY is unset, or if the reset
+    interval hasn't elapsed yet since the last purge.
+
+    Unlike /admin/sla-sweep (any authenticated client may trigger — it only
+    escalates/flags, never deletes), this genuinely restricts to ADMIN:
+    this endpoint hard-deletes data, so the bar for who may trigger it is
+    deliberately higher than "holds some valid API key."
+    """
+    if client is None or client.role != ApiClientRole.ADMIN:
+        raise HTTPException(403, "Only an admin API client may trigger a demo data reset.")
+    purged = await reset_demo_data_if_due()
+    return DemoResetResult(tickets_purged=purged)

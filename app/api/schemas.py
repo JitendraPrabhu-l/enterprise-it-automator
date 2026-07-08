@@ -92,3 +92,7 @@ class RunResult(BaseModel):
 class SlaSweepResult(BaseModel):
     escalated_approvals: list[int]
     stuck_tickets: list[int]
+
+
+class DemoResetResult(BaseModel):
+    tickets_purged: int
