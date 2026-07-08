@@ -1,5 +1,7 @@
 import pytest
+from sqlalchemy import select
 
+from app.db.models import AuditLog
 from app.mcp_server import tools as t
 from app.mcp_server.tools import ToolError
 
@@ -87,6 +89,105 @@ async def test_revoke_access_not_granted_rejected(session):
     await t.create_user(session, "bwayne", "Bruce Wayne", "b@example.com")
     with pytest.raises(ToolError, match="does not have access"):
         await t.revoke_access(session, "bwayne", "github:engineering")
+
+
+# --- Rejected attempts must leave an audit trail, not vanish silently ----
+#
+# Found live: a ticket's audit log showed only its follow-up
+# ticketing_add_ticket_comment entry, with no record the agent had first
+# attempted (and been refused) identity_disable_user against an
+# already-disabled employee — every ToolError-raising rejection previously
+# skipped _audit() entirely. Fixed by auditing (success=False) every
+# rejection, same as a successful call is audited (success=True).
+
+
+async def test_create_user_duplicate_rejection_is_audited(session):
+    await t.create_user(session, "asmith", "Alice Smith", "asmith@example.com")
+    with pytest.raises(ToolError):
+        await t.create_user(session, "asmith", "Alice Smith 2", "a2@example.com")
+
+    rows = list(await session.scalars(select(AuditLog).where(AuditLog.tool_name == "create_user")))
+    rejections = [r for r in rows if not r.success]
+    assert len(rejections) == 1
+    assert "already exists" in rejections[0].result
+
+
+async def test_disable_user_not_found_rejection_is_audited(session):
+    with pytest.raises(ToolError):
+        await t.disable_user(session, "ghost")
+
+    rows = list(await session.scalars(select(AuditLog).where(AuditLog.tool_name == "disable_user")))
+    assert len(rows) == 1
+    assert rows[0].success is False
+    assert "no such user" in rows[0].result.lower()
+
+
+async def test_disable_user_already_disabled_rejection_is_audited(session):
+    await t.create_user(session, "ckent", "Clark Kent", "c@example.com")
+    await t.disable_user(session, "ckent")
+    with pytest.raises(ToolError):
+        await t.disable_user(session, "ckent")
+
+    rows = list(await session.scalars(select(AuditLog).where(AuditLog.tool_name == "disable_user")))
+    assert len(rows) == 2, "both the successful disable AND the rejected re-attempt must be audited"
+    assert rows[0].success is True
+    assert rows[1].success is False
+    assert "already disabled" in rows[1].result
+
+
+async def test_revoke_access_not_granted_rejection_is_audited(session):
+    await t.create_user(session, "bwayne", "Bruce Wayne", "b@example.com")
+    with pytest.raises(ToolError):
+        await t.revoke_access(session, "bwayne", "github:engineering")
+
+    rows = list(await session.scalars(select(AuditLog).where(AuditLog.tool_name == "revoke_access")))
+    assert len(rows) == 1
+    assert rows[0].success is False
+    assert "does not have access" in rows[0].result
+
+
+async def test_rejection_audit_row_survives_session_scope_rollback():
+    """The actual bug caught before shipping: every one of these tools is
+    invoked in production as `async with session_scope() as session: ...`
+    (see identity_server.py/access_server.py), and session_scope() rolls
+    back the WHOLE session on any exception leaving that block — including
+    a session.add() that ran just before the raise. A first version of this
+    fix added the audit row but never committed it, so it looked correct
+    under the raw `session` fixture above (no wrapping rollback) but
+    silently vanished under the real session_scope() codepath. This test
+    uses session_scope() specifically to pin that it does NOT regress.
+    """
+    import os
+
+    os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    from app.config import get_settings
+    from app.db import session as db_session_module
+    from app.db.session import init_db, session_scope
+
+    get_settings.cache_clear()
+    db_session_module._engine = None
+    db_session_module._session_factory = None
+    await init_db()
+
+    try:
+        async with session_scope() as session:
+            await t.create_user(session, "existing", "Existing User", "e@example.com")
+
+        with pytest.raises(ToolError):
+            async with session_scope() as session:
+                await t.create_user(session, "existing", "Dup", "dup@example.com")
+
+        async with session_scope() as session:
+            rows = list(
+                await session.scalars(
+                    select(AuditLog).where(AuditLog.tool_name == "create_user", AuditLog.success.is_(False))
+                )
+            )
+        assert len(rows) == 1, "the rejected attempt's audit row must survive session_scope's rollback"
+    finally:
+        db_session_module._engine = None
+        db_session_module._session_factory = None
+        get_settings.cache_clear()
 
 
 async def test_is_sensitive(monkeypatch):

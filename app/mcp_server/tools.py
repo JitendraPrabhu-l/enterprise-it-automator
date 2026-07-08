@@ -87,6 +87,29 @@ async def _get_user(session: AsyncSession, username: str) -> EmployeeUser:
     return user
 
 
+async def _get_user_or_audit_rejection(
+    session: AsyncSession, username: str, *, actor: str, tool_name: str,
+    tool_args: dict, ticket_id: int | None,
+) -> EmployeeUser:
+    """Same lookup as _get_user, but for a caller that's about to attempt a
+    mutating/sensitive action: a "no such user" outcome is audited as a
+    rejected attempt (success=False) before the ToolError propagates, same
+    as the already-disabled/doesn't-have-access rejections below — every
+    ATTEMPT at one of these actions leaves a record, not just successful
+    ones. Not used by get_user (read-only, never audited at all, before or
+    after this change).
+    """
+    user = await session.scalar(select(EmployeeUser).where(EmployeeUser.username == username))
+    if user is None:
+        await _audit(
+            session, actor, tool_name, tool_args,
+            f"rejected: no such user: {username}", False, ticket_id,
+            commit_immediately=True,
+        )
+        raise ToolError(f"No such user: {username!r}")
+    return user
+
+
 async def _get_ticket(session: AsyncSession, ticket_id: int) -> Ticket:
     ticket = await session.get(Ticket, ticket_id)
     if ticket is None:
@@ -102,7 +125,24 @@ async def _audit(
     result: str,
     success: bool,
     ticket_id: int | None = None,
+    *,
+    commit_immediately: bool = False,
 ) -> None:
+    """commit_immediately=True is required for every rejection-path call
+    (a _audit(..., success=False, ...) immediately followed by `raise
+    ToolError(...)`): every tool here is invoked as
+    `async with session_scope() as session: ...` at the MCP-server layer
+    (see identity_server.py/access_server.py), and session_scope() rolls
+    back the ENTIRE session on any exception leaving that block — including
+    a session.add() that ran moments before the raise. Without an explicit
+    commit here, the audit row for a rejected attempt would be silently
+    discarded by that rollback, defeating the entire point of auditing
+    rejections at all. Confirmed live via a direct reproduction: a
+    rejected create_user's audit row was gone after the ToolError
+    propagated, until this flag was added. Success-path calls don't need
+    this — they're followed by a normal return, so session_scope()'s own
+    commit-on-clean-exit covers them already.
+    """
     session.add(
         AuditLog(
             ticket_id=ticket_id,
@@ -113,6 +153,8 @@ async def _audit(
             success=success,
         )
     )
+    if commit_immediately:
+        await session.commit()
 
 
 def is_sensitive(tool_name: str) -> bool:
@@ -144,6 +186,18 @@ async def create_user(
         select(EmployeeUser).where(EmployeeUser.username == username)
     )
     if existing is not None:
+        # Audited even though rejected: previously a no-op attempt like this
+        # left ZERO audit trail (ToolError raised before _audit() ran),
+        # indistinguishable from the tool never having been called at all —
+        # found live via a ticket whose audit log showed only its follow-up
+        # comment, with no record the agent had first tried and been
+        # refused. Every ATTEMPT at a sensitive/mutating action is now
+        # audited, success or not — see disable_user/revoke_access below.
+        await _audit(
+            session, actor, "create_user", {"username": username, "full_name": full_name, "email": email},
+            f"rejected: user already exists: {username}", False, ticket_id,
+            commit_immediately=True,
+        )
         raise ToolError(f"User already exists: {username!r}")
 
     # EmployeeUser.owned_by_client_id mirrors whoever owns the ticket that
@@ -186,8 +240,16 @@ async def disable_user(
     ticket_id: int | None = None,
 ) -> dict:
     """Sensitive action — must only be invoked after HITL approval."""
-    user = await _get_user(session, username)
+    user = await _get_user_or_audit_rejection(
+        session, username, actor=actor, tool_name="disable_user",
+        tool_args={"username": username}, ticket_id=ticket_id,
+    )
     if user.status == UserStatus.DISABLED:
+        await _audit(
+            session, actor, "disable_user", {"username": username},
+            f"rejected: user already disabled: {username}", False, ticket_id,
+            commit_immediately=True,
+        )
         raise ToolError(f"User {username!r} is already disabled")
     user.status = UserStatus.DISABLED
     await _audit(
@@ -222,8 +284,16 @@ async def revoke_access(
     ticket_id: int | None = None,
 ) -> dict:
     """Sensitive action — must only be invoked after HITL approval."""
-    user = await _get_user(session, username)
+    user = await _get_user_or_audit_rejection(
+        session, username, actor=actor, tool_name="revoke_access",
+        tool_args={"username": username, "resource": resource}, ticket_id=ticket_id,
+    )
     if resource not in user.access_grants:
+        await _audit(
+            session, actor, "revoke_access", {"username": username, "resource": resource},
+            f"rejected: user does not have access to {resource}: {username}", False, ticket_id,
+            commit_immediately=True,
+        )
         raise ToolError(f"User {username!r} does not have access to {resource!r}")
     user.access_grants = [g for g in user.access_grants if g != resource]
     await _audit(
