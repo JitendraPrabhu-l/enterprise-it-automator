@@ -129,6 +129,49 @@ async def test_sweep_flags_stuck_ticket_past_threshold(isolated_db):
     assert stuck == [1]
 
 
+async def test_sweep_marks_stuck_ticket_failed_not_just_audited(isolated_db):
+    """Found live: a ticket orphaned by a process restart mid-run stayed
+    frozen in "planning" in the dashboard forever — this sweep used to only
+    write an audit entry and never touch ticket.status, so nothing ever
+    gave the caller an actionable terminal state. Confirms the ticket
+    itself now transitions to FAILED with an explanatory result_summary,
+    not just a log entry nobody browsing the dashboard would see."""
+    stale = _now() - dt.timedelta(minutes=STUCK_TICKET_THRESHOLD_MINUTES + 5)
+    async with isolated_db.session_scope() as session:
+        ticket = Ticket(id=1, requester="hr@x.com", subject="s", body="b", status=TicketStatus.PLANNING)
+        session.add(ticket)
+        await session.flush()
+        await session.execute(
+            Ticket.__table__.update().where(Ticket.__table__.c.id == 1).values(updated_at=stale)
+        )
+
+    await sweep_stuck_tickets()
+
+    async with isolated_db.session_scope() as session:
+        ticket = await session.get(Ticket, 1)
+        assert ticket.status == TicketStatus.FAILED
+        assert "stuck" in ticket.result_summary.lower()
+        assert "planning" in ticket.result_summary.lower()
+
+
+async def test_sweep_marks_stuck_executing_ticket_failed_too(isolated_db):
+    stale = _now() - dt.timedelta(minutes=STUCK_TICKET_THRESHOLD_MINUTES + 5)
+    async with isolated_db.session_scope() as session:
+        ticket = Ticket(id=1, requester="hr@x.com", subject="s", body="b", status=TicketStatus.EXECUTING)
+        session.add(ticket)
+        await session.flush()
+        await session.execute(
+            Ticket.__table__.update().where(Ticket.__table__.c.id == 1).values(updated_at=stale)
+        )
+
+    stuck = await sweep_stuck_tickets()
+    assert stuck == [1]
+
+    async with isolated_db.session_scope() as session:
+        ticket = await session.get(Ticket, 1)
+        assert ticket.status == TicketStatus.FAILED
+
+
 async def test_sweep_ignores_recently_updated_planning_ticket(isolated_db):
     async with isolated_db.session_scope() as session:
         session.add(Ticket(id=1, requester="hr@x.com", subject="s", body="b", status=TicketStatus.PLANNING))

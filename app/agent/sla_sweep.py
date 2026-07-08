@@ -76,12 +76,21 @@ async def sweep_overdue_approvals() -> list[int]:
 
 
 async def sweep_stuck_tickets() -> list[int]:
-    """Flags tickets stuck in PLANNING/EXECUTING well past a normal run's
-    duration — these are the ones a crash or an unhandled exception outside
-    the graph's own error handling could have silently abandoned. Doesn't
-    change ticket.status (a human should look at *why* before deciding),
-    just writes an audit entry so it surfaces in the same operator-visible
-    trail as everything else.
+    """Marks tickets stuck in PLANNING/EXECUTING well past a normal run's
+    duration as FAILED — these are the ones a crash, an unhandled exception
+    outside the graph's own error handling, or a process restart landing
+    mid-run could have silently abandoned (submit_ticket in app/api/main.py
+    commits the Ticket row in PLANNING status, then separately calls
+    start_ticket_run; a process death in between leaves the row orphaned
+    forever with nothing left to ever resume it).
+
+    Previously only wrote an audit entry and left ticket.status untouched —
+    found live on a public demo deployment: a ticket submitted right as the
+    process redeployed stayed frozen in "planning" in the dashboard
+    indefinitely, since nothing ever changed its status even after this
+    sweep noticed it. A human/an operator dashboard needs an actionable
+    terminal state to show, not a permanent spinner; the caller can always
+    resubmit as a new ticket if genuinely still needed.
     """
     threshold = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=STUCK_TICKET_THRESHOLD_MINUTES)
     stuck_ids: list[int] = []
@@ -94,24 +103,30 @@ async def sweep_stuck_tickets() -> list[int]:
             )
         )
         for ticket in stuck:
+            previous_status = ticket.status.value
+            summary = (
+                f"Ticket {ticket.id} was stuck in {previous_status!r} since "
+                f"{ticket.updated_at.isoformat()}, past the "
+                f"{STUCK_TICKET_THRESHOLD_MINUTES}-minute stuck-ticket threshold "
+                "(likely a crash or process restart mid-run) — marked failed. "
+                "Resubmit as a new ticket if this is still needed."
+            )
+            ticket.status = TicketStatus.FAILED
+            ticket.result_summary = summary
             session.add(
                 AuditLog(
                     ticket_id=ticket.id,
                     actor="sla_sweep",
                     tool_name="stuck_ticket_detection",
                     tool_args={},
-                    result=(
-                        f"Ticket {ticket.id} has been in {ticket.status.value!r} since "
-                        f"{ticket.updated_at.isoformat()}, past the "
-                        f"{STUCK_TICKET_THRESHOLD_MINUTES}-minute stuck-ticket threshold."
-                    ),
+                    result=summary,
                     success=False,
                 )
             )
             stuck_ids.append(ticket.id)
 
     if stuck_ids:
-        logger.warning("SLA sweep flagged %d stuck ticket(s): %s", len(stuck_ids), stuck_ids)
+        logger.warning("SLA sweep marked %d stuck ticket(s) as failed: %s", len(stuck_ids), stuck_ids)
     return stuck_ids
 
 
