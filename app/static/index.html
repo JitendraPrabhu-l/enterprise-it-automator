@@ -118,7 +118,12 @@
   <div style="background:var(--panel); border:1px solid var(--border); border-radius:10px; max-width:560px; width:100%; max-height:85vh; overflow-y:auto; padding:16px 28px 24px;">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
       <h2 style="margin:0; font-size:15px; color:var(--text);">How this system works</h2>
-      <button type="button" class="link-btn" style="text-decoration:none; font-size:18px; line-height:1;" onclick="closeHowItWorks()">✕</button>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <button type="button" class="link-btn" title="View system flow diagram" style="text-decoration:none; display:flex; align-items:center; color:var(--muted);" onclick="openFlowDiagram()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M10 6.5h4M17.5 10v4M14 17.5h-4M6.5 14v-4"/></svg>
+        </button>
+        <button type="button" class="link-btn" style="text-decoration:none; font-size:18px; line-height:1;" onclick="closeHowItWorks()">✕</button>
+      </div>
     </div>
     <ol style="margin:0; padding-left:20px; font-size:13px; line-height:1.7; color:var(--muted);">
       <li><strong style="color:var(--text);">Tools &amp; framework:</strong> a LangGraph agent plans against a real MCP (Model Context Protocol) server — 3 domain servers (identity, access, ticketing), 9 tools total, discovered live via <code class="tool">tools/list</code> on every plan, not hardcoded.</li>
@@ -129,6 +134,117 @@
       <li><strong style="color:var(--text);">AG-UI:</strong> "Submit &amp; Watch Live" streams the agent's plan/execute/tool-call events over the AG-UI protocol in real time, instead of waiting for the whole run to finish.</li>
       <li><strong style="color:var(--text);">Failure handling:</strong> a step that fails on a stale assumption (e.g. already disabled) triggers a replan instead of a hard error; a ticket whose action never actually ran is marked <code class="tool">failed</code>, not a false "completed."</li>
     </ol>
+  </div>
+</div>
+
+<div id="flowDiagramOverlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:110; align-items:center; justify-content:center; padding:20px;" onclick="if(event.target===this) closeFlowDiagram()">
+  <div style="background:var(--panel); border:1px solid var(--border); border-radius:10px; max-width:640px; width:100%; max-height:88vh; overflow-y:auto; padding:16px 24px 20px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+      <h2 style="margin:0; font-size:15px; color:var(--text);">System flow</h2>
+      <button type="button" class="link-btn" style="text-decoration:none; font-size:18px; line-height:1;" onclick="closeFlowDiagram()">✕</button>
+    </div>
+    <div style="overflow-x:auto;">
+      <svg viewBox="0 0 700 600" width="100%" style="min-width:560px; display:block;" font-family="inherit">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#8a90a3"/>
+          </marker>
+        </defs>
+        <style>
+          .fbox { fill:#1c2130; stroke:#2a3040; stroke-width:1.2; }
+          .fbox.ok { stroke:#35c98f; }
+          .fbox.err { stroke:#f0546a; }
+          .fbox.warn { stroke:#f5a623; }
+          .fbox.accent { stroke:#5b8cff; }
+          .flabel { fill:#e6e8ee; font-size:12px; text-anchor:middle; }
+          .fsub { fill:#8a90a3; font-size:9.5px; text-anchor:middle; }
+          .fline { stroke:#4a5162; stroke-width:1.5; fill:none; marker-end:url(#arrow); }
+          .fedge-label { fill:#8a90a3; font-size:10px; text-anchor:middle; }
+        </style>
+
+        <!-- 1. User submits ticket -->
+        <rect class="fbox" x="220" y="10" width="200" height="42" rx="6"/>
+        <text class="flabel" x="320" y="30">User submits ticket</text>
+        <text class="fsub" x="320" y="44">dashboard, API, or Telegram</text>
+
+        <!-- 2. Agent plans -->
+        <path class="fline" d="M320,52 L320,76"/>
+        <rect class="fbox accent" x="210" y="76" width="220" height="42" rx="6"/>
+        <text class="flabel" x="320" y="96">Agent plans</text>
+        <text class="fsub" x="320" y="110">LangGraph + live MCP tools/list</text>
+
+        <!-- 3. Decision diamond: sensitive step? -->
+        <path class="fline" d="M320,118 L320,142"/>
+        <polygon points="320,142 400,180 320,218 240,180" class="fbox"/>
+        <text class="flabel" x="320" y="176">Sensitive</text>
+        <text class="flabel" x="320" y="190">step?</text>
+
+        <!-- LEFT column (no) -->
+        <path class="fline" d="M240,180 L110,180 L110,222"/>
+        <text class="fedge-label" x="175" y="172">no</text>
+        <rect class="fbox" x="20" y="222" width="180" height="42" rx="6"/>
+        <text class="flabel" x="110" y="242">Execute step</text>
+        <text class="fsub" x="110" y="256">grant_access, add comment, ...</text>
+
+        <path class="fline" d="M110,264 L110,304"/>
+        <rect class="fbox ok" x="20" y="304" width="180" height="38" rx="6"/>
+        <text class="flabel" x="110" y="328">Ticket completed</text>
+
+        <!-- RIGHT column (yes -> HITL) -->
+        <path class="fline" d="M400,180 L530,180 L530,222"/>
+        <text class="fedge-label" x="465" y="172">yes</text>
+        <rect class="fbox warn" x="420" y="222" width="220" height="46" rx="6"/>
+        <text class="flabel" x="530" y="242">HITL: await_approval</text>
+        <text class="fsub" x="530" y="257">interrupt() pauses the whole graph</text>
+
+        <!-- Telegram notify (dashed side branch) -->
+        <path class="fline" d="M420,255 L340,290" stroke-dasharray="3,3"/>
+        <rect class="fbox accent" x="210" y="290" width="150" height="36" rx="6" stroke-dasharray="3,3"/>
+        <text class="flabel" x="285" y="313" font-size="11">Telegram notify</text>
+
+        <!-- Reviewer decides -> 3 outcomes, all fanning out from one point -->
+        <path class="fline" d="M530,268 L530,306"/>
+        <circle cx="530" cy="306" r="2.5" fill="#8a90a3"/>
+        <text class="fedge-label" x="530" y="322">reviewer decides</text>
+
+        <path class="fline" d="M530,306 L355,368"/>
+        <text class="fedge-label" x="440" y="340">approve</text>
+        <rect class="fbox ok" x="270" y="368" width="170" height="38" rx="6"/>
+        <text class="flabel" x="355" y="392" font-size="11">Execute sensitive step</text>
+
+        <path class="fline" d="M530,306 L530,368"/>
+        <text class="fedge-label" x="548" y="340">reject</text>
+        <rect class="fbox err" x="460" y="368" width="150" height="38" rx="6"/>
+        <text class="flabel" x="535" y="392" font-size="11">Ticket rejected</text>
+
+        <path class="fline" d="M530,306 L625,306 L625,400 L600,416"/>
+        <text class="fedge-label" x="600" y="298">SLA expires</text>
+        <rect class="fbox warn" x="500" y="416" width="170" height="38" rx="6"/>
+        <text class="flabel" x="585" y="440" font-size="11">Escalated (unattended)</text>
+
+        <!-- Execute sensitive step outcome -->
+        <path class="fline" d="M355,406 L355,446"/>
+        <text class="fedge-label" x="270" y="432">on stale assumption</text>
+        <rect class="fbox" x="265" y="446" width="180" height="42" rx="6"/>
+        <text class="flabel" x="355" y="465" font-size="11">Replan</text>
+        <text class="fsub" x="355" y="479">accounts for what already happened</text>
+
+        <!-- Final outcomes -->
+        <path class="fline" d="M355,488 L355,528"/>
+        <rect class="fbox ok" x="230" y="528" width="130" height="36" rx="6"/>
+        <text class="flabel" x="295" y="551" font-size="11">Completed</text>
+
+        <path class="fline" d="M420,488 L420,528"/>
+        <text class="fedge-label" x="440" y="510">still not done</text>
+        <rect class="fbox err" x="380" y="528" width="130" height="36" rx="6"/>
+        <text class="flabel" x="445" y="551" font-size="11">Failed</text>
+      </svg>
+    </div>
+    <p style="margin:12px 0 0; font-size:11px; color:var(--muted); line-height:1.5;">
+      A step that succeeds after a replan (or on the first try) marks the ticket <code class="tool">completed</code>;
+      one whose required action never actually ran (e.g. re-offboarding an already-disabled employee) is marked
+      <code class="tool">failed</code> instead of a misleading "completed."
+    </p>
   </div>
 </div>
 
@@ -201,8 +317,16 @@ function openHowItWorks() {
 function closeHowItWorks() {
   document.getElementById("howItWorksOverlay").style.display = "none";
 }
+function openFlowDiagram() {
+  document.getElementById("flowDiagramOverlay").style.display = "flex";
+}
+function closeFlowDiagram() {
+  document.getElementById("flowDiagramOverlay").style.display = "none";
+}
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeHowItWorks();
+  if (e.key !== "Escape") return;
+  closeFlowDiagram();
+  closeHowItWorks();
 });
 
 function toast(msg, isErr) {
