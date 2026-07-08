@@ -374,8 +374,21 @@ let knownDemoApiKey = null;
 
 function updateDemoModeBanner() {
   const banner = document.getElementById("demoModeBanner");
+  const note = document.getElementById("demoKeyNote");
   const onDemoKey = !!knownDemoApiKey && apiKeyInput.value === knownDemoApiKey;
   banner.style.display = onDemoKey ? "flex" : "none";
+  // Same condition as the banner — this note must reflect whether THIS
+  // visitor is currently on the demo key, not just whether a demo key is
+  // configured on the server at all. Previously shown to every visitor,
+  // including one who typed in a real admin/reviewer key, since it only
+  // checked "is DEMO_API_KEY set anywhere" rather than "is this browser
+  // using it right now."
+  if (onDemoKey) {
+    note.textContent = "Using the public demo key and reviewer token — your tickets, approvals, and any employees you create are isolated from real data and hard-deleted within 24h. They can never affect or reveal real operational data.";
+    note.style.display = "block";
+  } else {
+    note.style.display = "none";
+  }
 }
 
 async function autoFillDemoKeyIfAvailable() {
@@ -407,11 +420,6 @@ async function autoFillDemoKeyIfAvailable() {
     if (data.reviewer_token && !reviewerInput.value) {
       reviewerInput.value = data.reviewer_token;
       localStorage.setItem("reviewerToken", data.reviewer_token);
-    }
-    if (data.api_key) {
-      const note = document.getElementById("demoKeyNote");
-      note.textContent = "Using the public demo key and reviewer token — your tickets, approvals, and any employees you create are isolated from real data and hard-deleted within 24h. They can never affect or reveal real operational data.";
-      note.style.display = "block";
     }
   } catch (e) {
     // No demo key configured, or the request failed — the fields just
