@@ -184,6 +184,35 @@ default `/tickets`, `/approvals`, and `/employees` views (pass `?include_demo=tr
 reveal demo tickets/approvals). To force a reset immediately instead of waiting for the
 daily sweep, `POST /admin/demo-reset` with your admin `API_KEY`.
 
+### Step 8 (optional) — Approve sensitive actions from Telegram
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`, follow the
+   prompts — you get a bot token back immediately, for free, no business verification
+   (unlike WhatsApp's Cloud API).
+2. Set `TELEGRAM_BOT_TOKEN` to that token, and generate a `TELEGRAM_WEBHOOK_SECRET`
+   the same way as `API_KEY`:
+   ```
+   python -c "import secrets; print(secrets.token_urlsafe(24))"
+   ```
+3. Point Telegram at your deployed webhook (replace both placeholders):
+   ```
+   curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://<your-app>.onrender.com/telegram/webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+   ```
+4. As a **real reviewer** (never the public demo reviewer — see below), message your
+   bot `/start <your reviewer token>` (the token `python -m app.db.seed` printed for
+   you). This is the only way a Telegram chat ever gets linked to a reviewer identity —
+   the bot looks your token up against the real `reviewers` table, so a wrong/guessed
+   token links nothing.
+
+From then on, every sensitive-action approval you're entitled to decide (an `it_admin`
+sees all; a `manager` only their own direct reports — same rule as the dashboard) gets
+pushed to your linked chat with inline **✅ Approve** / **❌ Reject** buttons. Tapping one
+calls the exact same authorization/decision logic as `POST /approvals/{id}/decide` — Telegram
+is just another authenticated entry point, never a weaker parallel path. Deliberately
+real-reviewers-only: the seeded public demo reviewer token can never be linked, so public
+demo traffic never reaches a real person's personal chat. Leave `TELEGRAM_BOT_TOKEN` unset
+to disable this entirely — the dashboard remains the only decision path, as before.
+
 ### Full environment variable list
 
 | Variable | Required | Where it comes from |
@@ -197,4 +226,6 @@ daily sweep, `POST /admin/demo-reset` with your admin `API_KEY`.
 | `SENSITIVE_ACTIONS` | defaulted in `render.yaml` | `disable_user,revoke_access,create_user,grant_access` |
 | `DEMO_API_KEY` | optional | a fresh, separate value — see Step 7 above. Leave unset to disable public demo access |
 | `DEMO_DATA_RESET_HOURS` | optional | defaults to `24` — how often the demo client's own tickets/approvals/audit entries are hard-deleted. No effect if `DEMO_API_KEY` is unset |
+| `TELEGRAM_BOT_TOKEN` | optional | from @BotFather — see Step 8 above. Leave unset to disable Telegram approvals entirely |
+| `TELEGRAM_WEBHOOK_SECRET` | optional | a fresh value, same generation method as `API_KEY` — verified against Telegram's own webhook secret-token header |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | optional | leave blank — tracing stays a no-op |

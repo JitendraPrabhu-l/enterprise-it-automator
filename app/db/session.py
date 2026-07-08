@@ -86,6 +86,7 @@ async def init_db() -> None:
     await _ensure_column(engine, table="tickets", column="submitted_by_client_id", ddl_type="INTEGER")
     await _ensure_column(engine, table="api_clients", column="data_last_purged_at", ddl_type="TIMESTAMP")
     await _ensure_column(engine, table="employee_users", column="owned_by_client_id", ddl_type="INTEGER")
+    await _ensure_column(engine, table="reviewers", column="telegram_chat_id", ddl_type="VARCHAR(64)")
 
 
 async def _ensure_column(engine, *, table: str, column: str, ddl_type: str) -> None:

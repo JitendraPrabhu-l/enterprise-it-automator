@@ -592,6 +592,53 @@ async def _authorize_demo_reviewer_scope(session, reviewer: Reviewer, approval: 
         )
 
 
+class ApprovalAlreadyDecidedError(Exception):
+    """Raised by _decide_approval_core when the approval isn't PENDING
+    anymore — a distinct, catchable case from ApprovalNotAuthorizedError so
+    each caller (HTTP route vs. Telegram webhook) can render its own
+    equivalent of a 404/409 without this shared core importing FastAPI."""
+
+
+class ApprovalNotFoundError(Exception):
+    """Raised by _decide_approval_core when approval_id doesn't exist."""
+
+
+async def _decide_approval_core(approval_id: int, *, approve: bool, reviewer: Reviewer) -> int:
+    """Shared core of deciding a pending approval — used by both
+    POST /approvals/{id}/decide (dashboard) and the Telegram webhook's
+    inline Approve/Reject buttons, so a reviewer deciding via Telegram goes
+    through the EXACT same authorization/state-transition logic as the
+    dashboard, not a parallel reimplementation that could silently drift or
+    weaken. Returns the ticket_id so the caller can resume/report on it.
+    """
+    async with session_scope() as session:
+        approval = await session.get(Approval, approval_id)
+        if approval is None:
+            raise ApprovalNotFoundError(f"No such approval: {approval_id}")
+        if approval.status != ApprovalStatus.PENDING:
+            raise ApprovalAlreadyDecidedError(f"Approval {approval_id} already {approval.status.value}")
+
+        await authorize_reviewer(session, reviewer.username, approval)
+        await _authorize_demo_reviewer_scope(session, reviewer, approval)
+
+        from datetime import datetime, timezone
+
+        approval.status = ApprovalStatus.APPROVED if approve else ApprovalStatus.REJECTED
+        approval.reviewer = reviewer.username
+        approval.resolved_at = datetime.now(timezone.utc)
+        ticket_id = approval.ticket_id
+
+        if not approve:
+            ticket = await session.get(Ticket, ticket_id)
+            if ticket is not None:
+                ticket.status = TicketStatus.REJECTED
+                ticket.result_summary = (
+                    f"Sensitive action {approval.tool_name} rejected by {reviewer.username}."
+                )
+
+    return ticket_id
+
+
 @app.post(
     "/approvals/{approval_id}/decide",
     response_model=RunResult,
@@ -617,33 +664,14 @@ async def decide_approval(
     the seeded public demo reviewer, further confined to demo-owned tickets
     only (see _authorize_demo_reviewer_scope).
     """
-    async with session_scope() as session:
-        approval = await session.get(Approval, approval_id)
-        if approval is None:
-            raise HTTPException(404, f"No such approval: {approval_id}")
-        if approval.status != ApprovalStatus.PENDING:
-            raise HTTPException(409, f"Approval {approval_id} already {approval.status.value}")
-
-        try:
-            await authorize_reviewer(session, reviewer.username, approval)
-            await _authorize_demo_reviewer_scope(session, reviewer, approval)
-        except ApprovalNotAuthorizedError as exc:
-            raise HTTPException(403, str(exc)) from exc
-
-        from datetime import datetime, timezone
-
-        approval.status = ApprovalStatus.APPROVED if payload.approve else ApprovalStatus.REJECTED
-        approval.reviewer = reviewer.username
-        approval.resolved_at = datetime.now(timezone.utc)
-        ticket_id = approval.ticket_id
-
-        if not payload.approve:
-            ticket = await session.get(Ticket, ticket_id)
-            if ticket is not None:
-                ticket.status = TicketStatus.REJECTED
-                ticket.result_summary = (
-                    f"Sensitive action {approval.tool_name} rejected by {reviewer.username}."
-                )
+    try:
+        ticket_id = await _decide_approval_core(approval_id, approve=payload.approve, reviewer=reviewer)
+    except ApprovalNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ApprovalAlreadyDecidedError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ApprovalNotAuthorizedError as exc:
+        raise HTTPException(403, str(exc)) from exc
 
     if not payload.approve:
         return RunResult(
@@ -788,3 +816,136 @@ async def trigger_demo_reset(
         raise HTTPException(403, "Only an admin API client may trigger a demo data reset.")
     purged = await reset_demo_data_if_due()
     return DemoResetResult(tickets_purged=purged)
+
+
+async def _handle_telegram_start(session, chat_id: str, token_text: str) -> None:
+    """`/start <reviewer-token>` — the ONLY way a Telegram chat ever gets
+    linked to a Reviewer row. Looks up the reviewer by their real
+    X-Reviewer-Token (the same secret app/api/auth.py's require_reviewer_token
+    checks), never by anything the message itself claims about identity, so
+    linking is exactly as strong as the dashboard's own reviewer auth — a
+    stranger messaging the bot with a guessed/wrong token links nothing.
+    """
+    from app.notifications.telegram import send_decision_confirmation
+
+    token = token_text.strip()
+    reviewer = await session.scalar(select(Reviewer).where(Reviewer.token == token))
+    if reviewer is None:
+        await send_decision_confirmation(
+            chat_id, approval_id=0, approved=False,
+            detail="Invalid reviewer token. Check the token from `python -m app.db.seed` and try again.",
+        )
+        return
+    reviewer.telegram_chat_id = str(chat_id)
+    await session.flush()
+    await send_decision_confirmation(
+        chat_id, approval_id=0, approved=True,
+        detail=f"Linked as reviewer {reviewer.username!r}. You'll now get pending approvals here.",
+    )
+
+
+async def _handle_telegram_callback_query(update: dict) -> None:
+    from app.notifications.telegram import (
+        answer_callback_query,
+        parse_decision_callback_data,
+        send_decision_confirmation,
+    )
+
+    callback_query = update["callback_query"]
+    callback_query_id = callback_query["id"]
+    chat_id = str(callback_query["message"]["chat"]["id"])
+    data = callback_query.get("data", "")
+
+    parsed = parse_decision_callback_data(data)
+    if parsed is None:
+        await answer_callback_query(callback_query_id, "Unrecognized action.")
+        return
+    approval_id, approve = parsed
+
+    async with session_scope() as session:
+        reviewer = await session.scalar(select(Reviewer).where(Reviewer.telegram_chat_id == chat_id))
+
+    if reviewer is None:
+        await answer_callback_query(callback_query_id, "This chat isn't linked to a reviewer.")
+        return
+
+    try:
+        ticket_id = await _decide_approval_core(approval_id, approve=approve, reviewer=reviewer)
+    except ApprovalNotFoundError:
+        await answer_callback_query(callback_query_id, "No such approval.")
+        return
+    except ApprovalAlreadyDecidedError as exc:
+        await answer_callback_query(callback_query_id, str(exc))
+        return
+    except ApprovalNotAuthorizedError as exc:
+        await answer_callback_query(callback_query_id, str(exc)[:200])
+        return
+
+    await answer_callback_query(callback_query_id, "Approved" if approve else "Rejected")
+
+    # The Approval row is already committed (approved/rejected) by
+    # _decide_approval_core above — resume_ticket_run failing here must not
+    # look like the decision itself failed to the reviewer. Reported via the
+    # confirmation message rather than raised, since Telegram's webhook
+    # response only ever needs to be {"ok": True} for THIS update; the ticket
+    # run resuming is a downstream concern the dashboard can also always
+    # recover/retry, same as any other resume_ticket_run failure today.
+    if approve:
+        try:
+            await resume_ticket_run(ticket_id)
+            detail = f"Ticket #{ticket_id} resumed."
+        except Exception:
+            logger.exception("Telegram-approved decision failed to resume ticket %d", ticket_id)
+            detail = f"Approved, but resuming ticket #{ticket_id} failed — check the dashboard."
+    else:
+        detail = f"Ticket #{ticket_id} marked rejected."
+    await send_decision_confirmation(chat_id, approval_id=approval_id, approved=approve, detail=detail)
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)) -> dict:
+    """Receives Telegram Bot API updates — either a `/start <reviewer-token>`
+    message (account linking, see _handle_telegram_start) or a
+    callback_query from an inline Approve/Reject button tap
+    (_handle_telegram_callback_query), which routes through the exact same
+    _decide_approval_core the dashboard uses.
+
+    Verifies Telegram's own webhook secret-token header (set via
+    setWebhook's secret_token param at deploy time) rather than trusting
+    that only Telegram can reach this public URL — anyone who knows/guesses
+    this endpoint's path otherwise could POST a forged callback_query.
+    A no-op 200 (not an error) if TELEGRAM_BOT_TOKEN is unset, so an
+    accidental hit against a deployment that never enabled this feature
+    doesn't look like a crash to Telegram's own retry logic.
+    """
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        return {"ok": True}
+    if settings.telegram_webhook_secret and x_telegram_bot_api_secret_token != settings.telegram_webhook_secret:
+        raise HTTPException(401, "Invalid Telegram webhook secret token.")
+
+    update = await request.json()
+
+    if "callback_query" in update:
+        await _handle_telegram_callback_query(update)
+        return {"ok": True}
+
+    message = update.get("message")
+    if message is None:
+        return {"ok": True}
+
+    text = message.get("text", "")
+    chat_id = str(message["chat"]["id"])
+    if text.startswith("/start"):
+        token_text = text[len("/start"):].strip()
+        if token_text:
+            async with session_scope() as session:
+                await _handle_telegram_start(session, chat_id, token_text)
+        else:
+            from app.notifications.telegram import send_decision_confirmation
+
+            await send_decision_confirmation(
+                chat_id, approval_id=0, approved=False,
+                detail="Send /start followed by your reviewer token to link this chat.",
+            )
+    return {"ok": True}

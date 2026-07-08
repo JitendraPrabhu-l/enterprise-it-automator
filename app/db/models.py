@@ -112,6 +112,16 @@ class Reviewer(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     role: Mapped[ReviewerRole] = mapped_column(Enum(ReviewerRole), default=ReviewerRole.MANAGER)
     token: Mapped[str] = mapped_column(String(64), unique=True, index=True, default=_default_reviewer_token)
+    # Set once, when this reviewer links their Telegram account by sending
+    # `/start <their own token>` to the bot (see app/notifications/telegram.py) —
+    # never entered by a user into any web form, so a chat_id alone can
+    # never be replayed against the wrong reviewer: the bot only stores it
+    # after verifying the token matches this exact row. Nullable because
+    # linking is opt-in; a reviewer who never messages the bot simply never
+    # gets Telegram notifications and keeps using the dashboard only, same
+    # as before this feature existed. Unique so one Telegram account can't
+    # accidentally end up linked to two reviewers at once.
+    telegram_chat_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

@@ -119,6 +119,29 @@ class Settings(BaseSettings):
     # cadence are different concerns that happen to both be periodic sweeps.
     demo_data_reset_hours: int = 24
 
+    # Optional: a Telegram bot token (from @BotFather — free, no business
+    # verification needed, unlike WhatsApp's Cloud API) that lets a real
+    # reviewer link their account (send /start <their reviewer token> to the
+    # bot) and then get pinged with inline Approve/Reject buttons on every
+    # sensitive-action approval they're entitled to decide — see
+    # app/notifications/telegram.py. Left blank by default: with no token,
+    # notify_reviewers_of_pending_approval() is a no-op and every existing
+    # code path (dashboard-only approvals) is completely unaffected.
+    # Deliberately real-reviewers-only — the public demo reviewer never gets
+    # linked, so demo approval traffic never reaches anyone's personal chat.
+    telegram_bot_token: str = ""
+
+    # Verified against Telegram's own `X-Telegram-Bot-Api-Secret-Token`
+    # header (set via the setWebhook API call's secret_token param) on
+    # every POST /telegram/webhook request — without this, anyone who
+    # discovers the webhook URL could POST a forged callback_query and
+    # trigger a real approval decision, bypassing the fact that only
+    # Telegram's servers are supposed to be able to reach this endpoint.
+    # Left blank by default (no check) purely so local dev/testing without
+    # a real Telegram webhook configured isn't forced to set this too;
+    # any real deployment enabling TELEGRAM_BOT_TOKEN should also set this.
+    telegram_webhook_secret: str = ""
+
     @property
     def sensitive_action_set(self) -> set[str]:
         return {a.strip() for a in self.sensitive_actions.split(",") if a.strip()}

@@ -509,6 +509,18 @@ deliberately skipped rather than silently missing:
   relationship — this is a small-team ops dashboard, not a multi-tenant
   system, and the real authorization boundary is who may *decide* an
   approval, not who may *view* one.
+- **Telegram approvals** (`app/notifications/telegram.py`, opt-in via
+  `TELEGRAM_BOT_TOKEN` — see `DEPLOYMENT.md`'s Step 8) — a real reviewer
+  links their account once (`/start <their reviewer token>` to the bot,
+  verified against the same `reviewers` table `require_reviewer_token`
+  checks) and then gets pushed every sensitive-action approval they're
+  entitled to decide, with inline Approve/Reject buttons. Tapping one
+  routes through the exact same authorization/decision core as
+  `POST /approvals/{id}/decide` — Telegram is another authenticated entry
+  point into the identical RBAC-checked flow, never a separate or weaker
+  one. Deliberately real-reviewers-only: the seeded public demo reviewer
+  can never be linked, so public demo traffic can't reach a real person's
+  chat.
 - **Approval replay prevention** (`app/mcp_server/approval_gate.py`) — an
   `Approval`'s `executed_at` is set the first time it authorizes a
   sensitive tool call; a second attempt to use the same `approval_id` is

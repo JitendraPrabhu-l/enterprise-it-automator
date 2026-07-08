@@ -554,6 +554,33 @@ def route_after_step_check(state: AgentState):
     return "execute_step"
 
 
+async def _notify_reviewers_if_configured(approval_id: int) -> None:
+    """Pushes a Telegram notification (with inline Approve/Reject buttons) to
+    every reviewer entitled to decide this approval who has linked a
+    Telegram chat — see app/notifications/telegram.py's module docstring
+    for the full linking/security model. A no-op with TELEGRAM_BOT_TOKEN
+    unset, and best-effort even when configured: a notification failure
+    must never fail the ticket run itself, since the dashboard remains a
+    fully functional path to decide this same approval regardless.
+    """
+    if not get_settings().telegram_bot_token:
+        return
+
+    from app.api.rbac import find_entitled_reviewers
+    from app.db.models import Approval
+    from app.notifications.telegram import notify_reviewers_of_pending_approval
+
+    try:
+        async with session_scope() as session:
+            approval = await session.get(Approval, approval_id)
+            if approval is None:
+                return
+            reviewers = await find_entitled_reviewers(session, approval)
+            await notify_reviewers_of_pending_approval(session, approval, reviewers)
+    except Exception:
+        logger.exception("Failed to notify reviewers via Telegram for approval %d", approval_id)
+
+
 async def await_approval_node(state: AgentState) -> dict:
     """Blocks the graph on a human decision via LangGraph's interrupt mechanism.
 
@@ -607,6 +634,8 @@ async def await_approval_node(state: AgentState) -> dict:
             existing_pending.status = TicketStatus.AWAITING_APPROVAL
         await session.flush()
         approval_id = approval_row.id
+
+    await _notify_reviewers_if_configured(approval_id)
 
     interrupt(
         {

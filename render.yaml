@@ -45,6 +45,15 @@ services:
       - key: DEMO_API_KEY
         sync: false
 
+      # Optional: lets a real reviewer approve/reject sensitive actions from
+      # Telegram instead of only the dashboard — see .env.example's
+      # TELEGRAM_BOT_TOKEN comment and DEPLOYMENT.md's Step 8. Leave
+      # blank/unset entirely to disable this feature.
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+
       # --- Non-secret config, safe to commit ---
       - key: LLM_PROVIDER
         value: groq

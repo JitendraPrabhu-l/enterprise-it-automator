@@ -61,3 +61,28 @@ async def authorize_reviewer(session: AsyncSession, reviewer_username: str, appr
             f"{reviewer_username!r} (role={reviewer.role.value}) is not the manager of "
             f"{target_username!r} — not entitled to decide approval {approval.id}."
         )
+
+
+async def find_entitled_reviewers(session: AsyncSession, approval: Approval) -> list[Reviewer]:
+    """The inverse of authorize_reviewer: every Reviewer who WOULD be let
+    through authorize_reviewer for this approval, used by
+    app/notifications/telegram.py to decide who to notify. Every it_admin
+    always qualifies (mirrors authorize_reviewer's own unconditional
+    it_admin bypass); a manager qualifies only if the approval's target
+    employee's manager_username matches them, same rule, just inverted from
+    "can THIS reviewer decide THIS approval" to "which reviewers can decide
+    THIS approval."
+    """
+    reviewers = list(await session.scalars(select(Reviewer)))
+    target_username = _target_username(approval)
+    manager_username = None
+    if target_username:
+        employee = await session.scalar(select(EmployeeUser).where(EmployeeUser.username == target_username))
+        if employee is not None:
+            manager_username = employee.manager_username
+
+    return [
+        reviewer
+        for reviewer in reviewers
+        if reviewer.role == ReviewerRole.IT_ADMIN or reviewer.username == manager_username
+    ]
