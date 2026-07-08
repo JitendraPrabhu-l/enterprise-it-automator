@@ -65,7 +65,7 @@ def strip_domain_prefix(tool_name: str) -> str:
 # servers' actual signatures by hand, same as SENSITIVE_ACTIONS being
 # hand-configured rather than introspected.
 TOOLS_ACCEPTING_TICKET_ID = {
-    "create_user", "disable_user", "grant_access", "revoke_access",
+    "create_user", "disable_user", "enable_user", "grant_access", "revoke_access",
     "add_ticket_comment", "get_ticket_status",
 }
 
@@ -255,6 +255,43 @@ async def disable_user(
     await _audit(
         session, actor, "disable_user", {"username": username},
         f"disabled user {username}", True, ticket_id,
+    )
+    return {"username": user.username, "status": user.status.value}
+
+
+async def enable_user(
+    session: AsyncSession,
+    username: str,
+    actor: str = "agent",
+    ticket_id: int | None = None,
+) -> dict:
+    """Sensitive action — must only be invoked after HITL approval.
+
+    Re-activates a previously disabled (offboarded) employee — the only
+    real re-onboarding path this system supports. Added after a live bug:
+    an onboarding ticket for an employee who already exists but is disabled
+    had no real tool to reach for, and the LLM planner hallucinated a
+    nonexistent identity_enable_user call instead of failing cleanly. This
+    IS that tool now, and it's deliberately sensitive (same bar as
+    disable_user) — reactivating a departed employee's account/access is
+    just as security-relevant as disabling one, not a routine onboarding
+    step.
+    """
+    user = await _get_user_or_audit_rejection(
+        session, username, actor=actor, tool_name="enable_user",
+        tool_args={"username": username}, ticket_id=ticket_id,
+    )
+    if user.status == UserStatus.ACTIVE:
+        await _audit(
+            session, actor, "enable_user", {"username": username},
+            f"rejected: user already active: {username}", False, ticket_id,
+            commit_immediately=True,
+        )
+        raise ToolError(f"User {username!r} is already active")
+    user.status = UserStatus.ACTIVE
+    await _audit(
+        session, actor, "enable_user", {"username": username},
+        f"re-enabled user {username}", True, ticket_id,
     )
     return {"username": user.username, "status": user.status.value}
 

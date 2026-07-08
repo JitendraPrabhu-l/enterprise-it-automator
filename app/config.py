@@ -73,7 +73,9 @@ class Settings(BaseSettings):
     # ran with zero human review — unlike disable_user/revoke_access, a
     # prompt-injected or hallucinated planner output could provision access
     # for the wrong (real) employee with nobody in the loop to catch it.
-    sensitive_actions: str = "disable_user,revoke_access,create_user,grant_access"
+    # enable_user (re-activating a previously offboarded account) carries
+    # the same risk as disable_user and is gated the same way.
+    sensitive_actions: str = "disable_user,enable_user,revoke_access,create_user,grant_access"
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000

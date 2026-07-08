@@ -36,10 +36,18 @@ Available tools:
 identity_create_user again — just access_grant_access for whatever the ticket \
 additionally requests beyond their current access (or return [] if nothing more is \
 needed).
+- If the observation says the employee ALREADY EXISTS but is DISABLED, this is a \
+re-onboarding of a previously offboarded employee — call identity_enable_user \
+(username) to reactivate their account, NOT identity_create_user (they already \
+have a record) and NOT any other tool name. Add access_grant_access steps for \
+whatever the ticket additionally requests beyond their current access.
 - If the observation says the employee DOES NOT EXIST, call identity_create_user \
 (identity_get_user is unnecessary — you already know it doesn't exist).
 - Never plan an identity_get_user call as a standalone step; the existence check has \
 already been done for you via the observation.
+- Only identity_create_user and identity_enable_user exist for bringing an employee \
+into an active state — never invent or guess a different tool name (e.g. an \
+"activate" or "reactivate" tool does not exist).
 
 {OUTPUT_FORMAT_INSTRUCTIONS}
 """

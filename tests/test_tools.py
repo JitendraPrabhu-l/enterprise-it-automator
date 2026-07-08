@@ -85,6 +85,32 @@ async def test_disable_user_already_disabled_rejected(session):
         await t.disable_user(session, "ckent")
 
 
+async def test_enable_user_reactivates_a_disabled_employee(session):
+    """Re-onboarding: enable_user is the only real tool for bringing a
+    previously-disabled employee back to active — added after a live bug
+    where the LLM planner hallucinated a nonexistent identity_enable_user
+    call for exactly this scenario, since no such tool existed yet."""
+    await t.create_user(session, "ckent", "Clark Kent", "c@example.com")
+    await t.disable_user(session, "ckent")
+
+    enabled = await t.enable_user(session, "ckent")
+    assert enabled["status"] == "active"
+
+    fetched = await t.get_user(session, "ckent")
+    assert fetched["status"] == "active"
+
+
+async def test_enable_user_not_found(session):
+    with pytest.raises(ToolError, match="No such user"):
+        await t.enable_user(session, "ghost")
+
+
+async def test_enable_user_already_active_rejected(session):
+    await t.create_user(session, "ckent", "Clark Kent", "c@example.com")
+    with pytest.raises(ToolError, match="already active"):
+        await t.enable_user(session, "ckent")
+
+
 async def test_revoke_access_not_granted_rejected(session):
     await t.create_user(session, "bwayne", "Bruce Wayne", "b@example.com")
     with pytest.raises(ToolError, match="does not have access"):
@@ -146,6 +172,27 @@ async def test_revoke_access_not_granted_rejection_is_audited(session):
     assert "does not have access" in rows[0].result
 
 
+async def test_enable_user_not_found_rejection_is_audited(session):
+    with pytest.raises(ToolError):
+        await t.enable_user(session, "ghost")
+
+    rows = list(await session.scalars(select(AuditLog).where(AuditLog.tool_name == "enable_user")))
+    assert len(rows) == 1
+    assert rows[0].success is False
+    assert "no such user" in rows[0].result.lower()
+
+
+async def test_enable_user_already_active_rejection_is_audited(session):
+    await t.create_user(session, "ckent", "Clark Kent", "c@example.com")
+    with pytest.raises(ToolError):
+        await t.enable_user(session, "ckent")
+
+    rows = list(await session.scalars(select(AuditLog).where(AuditLog.tool_name == "enable_user")))
+    assert len(rows) == 1
+    assert rows[0].success is False
+    assert "already active" in rows[0].result
+
+
 async def test_rejection_audit_row_survives_session_scope_rollback():
     """The actual bug caught before shipping: every one of these tools is
     invoked in production as `async with session_scope() as session: ...`
@@ -205,10 +252,11 @@ async def test_is_sensitive(monkeypatch):
     """
     from app.config import get_settings
 
-    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,revoke_access,create_user,grant_access")
+    monkeypatch.setenv("SENSITIVE_ACTIONS", "disable_user,enable_user,revoke_access,create_user,grant_access")
     get_settings.cache_clear()
 
     assert t.is_sensitive("disable_user") is True
+    assert t.is_sensitive("enable_user") is True
     assert t.is_sensitive("revoke_access") is True
     assert t.is_sensitive("grant_access") is True
     assert t.is_sensitive("create_user") is True

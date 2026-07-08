@@ -78,7 +78,7 @@ services:
       # (DNS-rebinding Host-header rejection) from the mcp SDK's own
       # TransportSecurityMiddleware.
       MCP_ALLOWED_HOSTS: mcp-server:8765
-      SENSITIVE_ACTIONS: disable_user,revoke_access,create_user,grant_access
+      SENSITIVE_ACTIONS: disable_user,enable_user,revoke_access,create_user,grant_access
     # No `ports:` mapping — intentional, see the SECURITY note above this
     # service. Only `app` needs to reach mcp-server, over the internal
     # compose network; nothing here needs to be reachable from the host.
@@ -94,7 +94,7 @@ services:
       MCP_TRANSPORT: http
       MCP_SERVER_URL: http://mcp-server:8765/mcp
       MCP_SERVER_TOKEN: ${MCP_SERVER_TOKEN:?MCP_SERVER_TOKEN must be set — the http transport refuses to start without it}
-      SENSITIVE_ACTIONS: disable_user,revoke_access,create_user,grant_access
+      SENSITIVE_ACTIONS: disable_user,enable_user,revoke_access,create_user,grant_access
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}

@@ -49,7 +49,7 @@ services:
       - key: LLM_PROVIDER
         value: groq
       - key: SENSITIVE_ACTIONS
-        value: disable_user,revoke_access,create_user,grant_access
+        value: disable_user,enable_user,revoke_access,create_user,grant_access
       - key: APPROVAL_SLA_MINUTES
         value: "60"
       - key: SLA_SWEEP_INTERVAL_SECONDS

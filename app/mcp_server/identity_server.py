@@ -82,3 +82,35 @@ async def disable_user(
         return await t.disable_user(
             session, username, actor="mcp-client", ticket_id=ticket_id
         )
+
+
+@identity_mcp.tool(
+    # Same sensitivity/annotation reasoning as disable_user: re-activating a
+    # previously offboarded account is just as consequential a state change
+    # as disabling one, not a routine onboarding step, so it requires the
+    # same HITL approval gate.
+    annotations=ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False
+    )
+)
+async def enable_user(
+    username: str, approval_id: int, ticket_id: int | None = None
+) -> dict:
+    """Re-activate a previously disabled employee's account (re-onboarding).
+    SENSITIVE: requires a prior human-approved `approval_id` matching this
+    exact tool call, or the server refuses the action — see disable_user's
+    docstring for why the approval-gate check uses the namespaced
+    "identity_enable_user" name.
+
+    Added after a live bug: an onboarding ticket for an employee who
+    already exists but is disabled had no real tool to reach for, and the
+    LLM planner hallucinated a nonexistent identity_enable_user call
+    instead of failing cleanly. This is that tool now.
+    """
+    async with session_scope() as session:
+        await require_approval(
+            session, approval_id, "identity_enable_user", {"username": username}
+        )
+        return await t.enable_user(
+            session, username, actor="mcp-client", ticket_id=ticket_id
+        )

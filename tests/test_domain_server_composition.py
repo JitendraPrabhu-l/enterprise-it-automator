@@ -41,11 +41,17 @@ async def test_gateway_exposes_all_domain_tools_namespaced(monkeypatch):
     assert "revoke_access" not in tool_names
 
 
-async def test_gateway_exposes_exactly_8_tools(monkeypatch):
-    """3 identity + 2 access + 2 ticketing + 1 is_sensitive_action = 8.
-    A regression here means a domain server's tool count changed without
-    updating this expectation, or composition silently dropped/duplicated
-    a tool."""
+async def test_gateway_exposes_exactly_9_tools(monkeypatch):
+    """4 identity (get_user/create_user/disable_user/enable_user) + 2 access
+    + 2 ticketing + 1 is_sensitive_action = 9. A regression here means a
+    domain server's tool count changed without updating this expectation,
+    or composition silently dropped/duplicated a tool.
+
+    enable_user (re-activating a previously disabled employee) was added
+    after a live bug: an onboarding ticket for an employee who exists but
+    is disabled had no real tool to reach for, and the LLM planner
+    hallucinated a nonexistent identity_enable_user call instead of
+    failing cleanly."""
     from app.db import session as db_session_module
     from app.config import get_settings
 
@@ -56,7 +62,7 @@ async def test_gateway_exposes_exactly_8_tools(monkeypatch):
 
     await _bootstrap()
     tools = await mcp.list_tools()
-    assert len(tools) == 8
+    assert len(tools) == 9
 
 
 async def test_gateway_tools_preserve_original_descriptions(monkeypatch):
