@@ -8,6 +8,8 @@ from app.agent.graph import (
     _extract_json_array,
     _extract_username,
     _mask_pii_for_prompt,
+    _required_action_missing,
+    finalize_node,
     route_after_plan,
     route_after_step_check,
 )
@@ -205,3 +207,143 @@ def test_mask_pii_for_prompt_passes_through_non_json_unchanged():
 
 def test_mask_pii_for_prompt_passes_through_non_dict_json_unchanged():
     assert _mask_pii_for_prompt("[1, 2, 3]") == "[1, 2, 3]"
+
+
+# --- _required_action_missing / finalize_node: OFFBOARDING tickets that
+# never actually called disable_user must be marked FAILED, not COMPLETED
+# --------------------------------------------------------------------
+#
+# Found live: an offboarding ticket for an employee already disabled (or
+# never existing at all) resolved as COMPLETED having never called
+# disable_user at all — indistinguishable at a glance in the dashboard from
+# a ticket that genuinely offboarded someone. The employee's end-state may
+# already match what was asked, but the ticket's own stated task was never
+# carried out THIS run.
+
+
+def test_required_action_missing_true_when_disable_user_never_ran():
+    assert _required_action_missing("OFFBOARDING", []) is True
+
+
+def test_required_action_missing_false_when_disable_user_succeeded():
+    results = [{"tool": "identity_disable_user", "args": {}, "result": "ok", "ok": True}]
+    assert _required_action_missing("OFFBOARDING", results) is False
+
+
+def test_required_action_missing_false_when_disable_user_succeeded_bare_name():
+    results = [{"tool": "disable_user", "args": {}, "result": "ok", "ok": True}]
+    assert _required_action_missing("OFFBOARDING", results) is False
+
+
+def test_required_action_missing_true_when_disable_user_only_failed():
+    """A FAILED disable_user attempt doesn't count as having run it — only
+    a successful one satisfies the required action."""
+    results = [{"tool": "identity_disable_user", "args": {}, "result": "already disabled", "ok": False}]
+    assert _required_action_missing("OFFBOARDING", results) is True
+
+
+def test_required_action_missing_true_when_only_a_comment_was_posted():
+    results = [
+        {"tool": "ticketing_add_ticket_comment", "args": {}, "result": "posted", "ok": True},
+    ]
+    assert _required_action_missing("OFFBOARDING", results) is True
+
+
+def test_required_action_missing_not_applicable_to_access_change():
+    """ACCESS_CHANGE genuinely has no single required action (grant vs.
+    revoke vs. neither, if access already matches) — must never flag."""
+    assert _required_action_missing("ACCESS_CHANGE", []) is False
+
+
+def test_required_action_missing_not_applicable_to_onboarding():
+    assert _required_action_missing("ONBOARDING", []) is False
+
+
+@pytest.fixture
+async def isolated_db(monkeypatch, tmp_path):
+    from app.config import get_settings
+    from app.db import session as db_session_module
+
+    db_path = tmp_path / "finalize_node_test.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path.as_posix()}")
+    get_settings.cache_clear()
+    db_session_module._engine = None
+    db_session_module._session_factory = None
+    await db_session_module.init_db()
+    yield db_session_module
+    db_session_module._engine = None
+    db_session_module._session_factory = None
+    get_settings.cache_clear()
+
+
+def _base_state(**overrides) -> dict:
+    state = {
+        "messages": [], "ticket_id": 1, "ticket_text": "irrelevant",
+        "category": "OFFBOARDING", "plan": [], "plan_index": 0,
+        "pending_approval_id": None, "results": [], "done": False, "error": None,
+    }
+    state.update(overrides)
+    return state
+
+
+async def test_finalize_marks_offboarding_ticket_failed_when_disable_user_never_ran(isolated_db):
+    from app.db.models import Ticket, TicketStatus
+
+    async with isolated_db.session_scope() as session:
+        session.add(Ticket(id=1, requester="hr@x.com", subject="s", body="b", status=TicketStatus.EXECUTING))
+
+    results = [
+        {"tool": "ticketing_add_ticket_comment", "args": {}, "result": "posted", "ok": True},
+    ]
+    await finalize_node(_base_state(results=results))
+
+    async with isolated_db.session_scope() as session:
+        ticket = await session.get(Ticket, 1)
+        assert ticket.status == TicketStatus.FAILED
+        assert "offboard" in ticket.result_summary.lower()
+
+
+async def test_finalize_completes_offboarding_ticket_when_disable_user_succeeded(isolated_db):
+    from app.db.models import Ticket, TicketStatus
+
+    async with isolated_db.session_scope() as session:
+        session.add(Ticket(id=1, requester="hr@x.com", subject="s", body="b", status=TicketStatus.EXECUTING))
+
+    results = [
+        {"tool": "identity_disable_user", "args": {"username": "jsmith"}, "result": "ok", "ok": True},
+    ]
+    await finalize_node(_base_state(results=results))
+
+    async with isolated_db.session_scope() as session:
+        ticket = await session.get(Ticket, 1)
+        assert ticket.status == TicketStatus.COMPLETED
+
+
+async def test_finalize_still_completes_access_change_ticket_with_no_actions(isolated_db):
+    """The fix is deliberately scoped to OFFBOARDING — an ACCESS_CHANGE
+    ticket resolving with zero actions (e.g. requested access already
+    granted) must remain COMPLETED, unchanged from before."""
+    from app.db.models import Ticket, TicketStatus
+
+    async with isolated_db.session_scope() as session:
+        session.add(Ticket(id=1, requester="hr@x.com", subject="s", body="b", status=TicketStatus.EXECUTING))
+
+    await finalize_node(_base_state(category="ACCESS_CHANGE", results=[]))
+
+    async with isolated_db.session_scope() as session:
+        ticket = await session.get(Ticket, 1)
+        assert ticket.status == TicketStatus.COMPLETED
+
+
+async def test_finalize_still_fails_ticket_on_real_error_regardless_of_category(isolated_db):
+    from app.db.models import Ticket, TicketStatus
+
+    async with isolated_db.session_scope() as session:
+        session.add(Ticket(id=1, requester="hr@x.com", subject="s", body="b", status=TicketStatus.EXECUTING))
+
+    await finalize_node(_base_state(error="Planner returned malformed JSON"))
+
+    async with isolated_db.session_scope() as session:
+        ticket = await session.get(Ticket, 1)
+        assert ticket.status == TicketStatus.FAILED
+        assert ticket.result_summary == "Planner returned malformed JSON"

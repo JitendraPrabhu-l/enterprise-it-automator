@@ -64,7 +64,7 @@ from app.agent.state import AgentState, BatchStepInput
 from app.config import get_settings
 from app.db.session import session_scope
 from app.mcp_server.approval_gate import find_approved
-from app.mcp_server.tools import accepts_ticket_id, is_sensitive
+from app.mcp_server.tools import accepts_ticket_id, is_sensitive, strip_domain_prefix
 from app.observability import record_llm_call, trace_graph_node
 
 logger = logging.getLogger(__name__)
@@ -807,12 +807,37 @@ def _describe_result(tool: str, args: dict, raw_result: str) -> str:
     return f"{tool} completed for {username}." if username else f"{tool} completed."
 
 
+
+# Maps a ticket category to the tool whose SUCCESSFUL execution is the
+# actual point of that category of ticket — used by finalize_node to tell
+# "we completed the ticket's real intent" apart from "we ran zero relevant
+# actions and just left a comment," which previously both reported
+# TicketStatus.COMPLETED identically. Deliberately narrow to OFFBOARDING:
+# an ACCESS_CHANGE ticket genuinely has no single required tool (grant vs.
+# revoke vs. neither, if access already matches), so "no actions were
+# required" legitimately IS success there — this mapping only exists for
+# categories with one unambiguous required action.
+_REQUIRED_ACTION_BY_CATEGORY = {
+    "OFFBOARDING": "disable_user",
+}
+
+
+def _required_action_missing(category: str, results: list[dict]) -> bool:
+    required = _REQUIRED_ACTION_BY_CATEGORY.get(category)
+    if required is None:
+        return False
+    return not any(
+        r["ok"] and strip_domain_prefix(r["tool"]) == required for r in results
+    )
+
+
 async def finalize_node(state: AgentState) -> dict:
     from app.db.models import Ticket, TicketStatus
 
     results = state.get("results", [])
     failed = [r for r in results if not r["ok"]]
     error = state.get("error")
+    category = state.get("category", "")
 
     if error:
         status = TicketStatus.FAILED
@@ -820,6 +845,32 @@ async def finalize_node(state: AgentState) -> dict:
     elif failed:
         status = TicketStatus.FAILED
         summary = "; ".join(f"{r['tool']} failed: {r['result']}" for r in failed)
+    elif _required_action_missing(category, results):
+        # Found live: an offboarding ticket for an employee already disabled
+        # (or never existing at all) resolved as COMPLETED having never
+        # actually called disable_user — indistinguishable at a glance from
+        # a ticket that genuinely offboarded someone. The employee's
+        # end-state may already match what was asked, but the ticket's own
+        # stated task (offboard this specific account, right now) was never
+        # carried out this run, so FAILED is the more honest terminal state
+        # here — not because anything crashed, but because there's nothing
+        # to point to as "this ticket did the thing it was asked to do."
+        #
+        # Leads with the WHY, not just a description of whatever else ran
+        # (e.g. a ticketing_add_ticket_comment noting the account was
+        # already disabled) — that context is still appended, but the
+        # actual reason this is FAILED must be the first thing a reviewer
+        # sees, not require them to infer it from an unrelated-looking
+        # comment log.
+        status = TicketStatus.FAILED
+        reason = "Ticket's offboarding action (disable_user) was never executed this run."
+        if results:
+            details = " ".join(
+                _describe_result(r["tool"], r["args"], r["result"]) for r in results
+            )
+            summary = f"{reason} {details}"
+        else:
+            summary = f"{reason} No action was taken — nothing to offboard."
     elif not results:
         status = TicketStatus.COMPLETED
         summary = "No actions were required for this ticket."
