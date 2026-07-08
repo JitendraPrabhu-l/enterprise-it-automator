@@ -1,19 +1,22 @@
 """Daily reset for the public demo client's own data (Settings.demo_api_key
 — see app/api/main.py's _ensure_demo_guest_client).
 
-Keeping demo traffic from mixing with real operational data has two parts,
-already both in place: read-scoping (Ticket.submitted_by_client_id, so a
-demo submission is never visible to any OTHER standard client) and a low
-daily request cap. This module adds the third piece — the demo client's
-OWN tickets/approvals/audit entries don't accumulate forever alongside real
-ones; they're hard-deleted once a day, keyed off ApiClient.data_last_purged_at
-so this only ever runs against the one client it's meant for, on a fixed
-daily cadence, not a rolling per-row TTL.
+Keeping demo traffic from mixing with real operational data has several
+parts, already in place: read-scoping (Ticket.submitted_by_client_id /
+EmployeeUser.owned_by_client_id, so a demo submission or demo-created
+employee is never visible to any OTHER standard client, nor in ADMIN's
+default view), a low daily request cap, and a demo-only reviewer confined
+to demo-owned tickets (app/api/main.py's _ensure_demo_reviewer). This
+module adds the last piece — the demo client's OWN tickets/approvals/audit
+entries/employees don't accumulate forever alongside real ones; they're
+hard-deleted once a day, keyed off ApiClient.data_last_purged_at so this
+only ever runs against the one client it's meant for, on a fixed daily
+cadence, not a rolling per-row TTL.
 
 Deliberately narrow in scope: this ONLY ever touches rows owned by the
-DEMO_API_KEY client. A real ApiClient's tickets are never purged by
-anything in this module — there is no general-purpose "clean up old
-tickets" feature here, on purpose.
+DEMO_API_KEY client. A real ApiClient's tickets/employees are never purged
+by anything in this module — there is no general-purpose "clean up old
+data" feature here, on purpose.
 """
 
 import asyncio
@@ -23,7 +26,7 @@ import logging
 from sqlalchemy import delete, select
 
 from app.config import get_settings
-from app.db.models import ApiClient, Approval, AuditLog, Ticket
+from app.db.models import ApiClient, Approval, AuditLog, EmployeeUser, Ticket
 from app.db.session import session_scope
 
 logger = logging.getLogger(__name__)
@@ -56,8 +59,10 @@ async def reset_demo_data_if_due() -> int:
     dependent approvals/audit entries — deleted explicitly and first, since
     Ticket's ORM-level cascade="all, delete-orphan" only fires when deleted
     THROUGH the ORM relationship, not via a bulk DELETE statement like this)
-    if the configured reset interval has elapsed since the last purge, or
-    if it's never been purged before.
+    plus any EmployeeUser rows it created (identity_create_user sets
+    EmployeeUser.owned_by_client_id — see app/mcp_server/tools.py's
+    create_user) if the configured reset interval has elapsed since the
+    last purge, or if it's never been purged before.
 
     Also deletes each purged ticket's LangGraph checkpoint state (a
     separate store from the app DB — see app.agent.runner.delete_ticket_thread)
@@ -65,7 +70,9 @@ async def reset_demo_data_if_due() -> int:
     they belong to is gone.
 
     No-op (returns 0) if DEMO_API_KEY is unset, or if the reset isn't due
-    yet. Returns the number of tickets deleted.
+    yet. Returns the number of tickets deleted (not employees — tickets are
+    the unit this feature already reports on; employee cleanup is a
+    consequence of the same reset, not a separately-tracked count).
     """
     now = dt.datetime.now(dt.timezone.utc)
 
@@ -83,6 +90,7 @@ async def reset_demo_data_if_due() -> int:
             await session.execute(delete(Approval).where(Approval.ticket_id.in_(ticket_ids)))
             await session.execute(delete(AuditLog).where(AuditLog.ticket_id.in_(ticket_ids)))
             await session.execute(delete(Ticket).where(Ticket.id.in_(ticket_ids)))
+        await session.execute(delete(EmployeeUser).where(EmployeeUser.owned_by_client_id == client_id))
         client.data_last_purged_at = now
         client.daily_request_count = 0
         client.request_count_reset_at = now

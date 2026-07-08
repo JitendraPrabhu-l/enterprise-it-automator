@@ -32,6 +32,7 @@ async def client(monkeypatch, tmp_path):
     await db_session_module.init_db()
     await main_module._ensure_bootstrap_admin_client()
     await main_module._ensure_demo_guest_client()
+    await main_module._ensure_demo_reviewer()
 
     transport = httpx.ASGITransport(app=main_module.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -59,6 +60,7 @@ async def client_no_demo_key(monkeypatch, tmp_path):
     await db_session_module.init_db()
     await main_module._ensure_bootstrap_admin_client()
     await main_module._ensure_demo_guest_client()
+    await main_module._ensure_demo_reviewer()
 
     transport = httpx.ASGITransport(app=main_module.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -80,13 +82,15 @@ async def test_demo_key_endpoint_is_unauthenticated(client):
 async def test_demo_key_endpoint_returns_the_configured_key(client):
     ac, _ = client
     resp = await ac.get("/demo-key")
-    assert resp.json() == {"api_key": "public-demo-key"}
+    data = resp.json()
+    assert data["api_key"] == "public-demo-key"
+    assert data["reviewer_token"], "a demo reviewer token must be issued alongside the demo API key"
 
 
 async def test_demo_key_endpoint_returns_null_when_unconfigured(client_no_demo_key):
     ac, _ = client_no_demo_key
     resp = await ac.get("/demo-key")
-    assert resp.json() == {"api_key": None}
+    assert resp.json() == {"api_key": None, "reviewer_token": None}
 
 
 async def test_demo_key_actually_authenticates_and_can_submit_tickets(client, monkeypatch):

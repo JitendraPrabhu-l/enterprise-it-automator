@@ -66,6 +66,18 @@ class EmployeeUser(Base):
     # username of this employee's manager, used to decide who besides an
     # it_admin reviewer may approve a sensitive action targeting them.
     manager_username: Mapped[str] = mapped_column(String(64), default="")
+    # Set only for employees created via identity_create_user while running a
+    # ticket submitted by a non-ADMIN ApiClient (app/mcp_server/tools.py's
+    # create_user, threaded from Ticket.submitted_by_client_id) — NULL for
+    # every employee seeded directly (app/db/seed.py) or created under the
+    # unauthenticated/ADMIN API_KEY. This is what lets GET /employees hide
+    # real company employees from a STANDARD/demo caller while still
+    # showing that caller the fictional employees it created itself: same
+    # "who actually owns this row" pattern as Ticket.submitted_by_client_id,
+    # applied to the OTHER piece of state a demo ticket can create. Also
+    # used by app/agent/demo_purge.py to hard-delete these rows alongside
+    # the demo client's tickets/approvals/audit entries.
+    owned_by_client_id: Mapped[int | None] = mapped_column(ForeignKey("api_clients.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

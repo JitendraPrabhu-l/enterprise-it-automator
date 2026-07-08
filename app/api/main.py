@@ -41,6 +41,7 @@ from app.db.models import (
     AuditLog,
     EmployeeUser,
     Reviewer,
+    ReviewerRole,
     Ticket,
     TicketStatus,
     UserStatus,
@@ -109,6 +110,40 @@ async def _ensure_demo_guest_client() -> None:
             )
 
 
+DEMO_REVIEWER_USERNAME = "public-demo-reviewer"
+
+
+async def _ensure_demo_reviewer() -> None:
+    """Ensures a Reviewer row named DEMO_REVIEWER_USERNAME exists, if
+    DEMO_API_KEY is configured, so a public demo visitor's HITL approvals
+    are fully self-contained — without this, the ONLY way to approve a
+    sensitive action on a demo-submitted ticket would be a real reviewer
+    token (mchen/admin from app/db/seed.py), which would mean either handing
+    out a real reviewer's credential publicly (defeats the point of a
+    low-privilege demo key) or leaving every demo ticket's sensitive step
+    permanently stuck pending.
+
+    role=IT_ADMIN (so app/api/rbac.py's authorize_reviewer lets it decide
+    ANY approval by role) is intentionally paired with a SEPARATE, stricter
+    check — decide_approval in this module additionally requires the
+    approval's ticket to be owned by the demo ApiClient before this specific
+    reviewer may decide it. IT_ADMIN alone would otherwise let a public demo
+    visitor decide real, non-demo approvals; the extra ownership check is
+    what actually confines it to demo-owned tickets. See decide_approval.
+
+    Token is generated once (like any Reviewer.token — see
+    _default_reviewer_token) and persisted, not regenerated on every
+    restart, so GET /demo-key keeps returning a working token across
+    redeploys.
+    """
+    if not get_settings().demo_api_key:
+        return
+    async with session_scope() as session:
+        existing = await session.scalar(select(Reviewer).where(Reviewer.username == DEMO_REVIEWER_USERNAME))
+        if existing is None:
+            session.add(Reviewer(username=DEMO_REVIEWER_USERNAME, role=ReviewerRole.IT_ADMIN))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not get_settings().api_key:
@@ -119,6 +154,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     await _ensure_bootstrap_admin_client()
     await _ensure_demo_guest_client()
+    await _ensure_demo_reviewer()
     sla_sweep_task = asyncio.create_task(sla_sweep_loop())
     demo_purge_task = asyncio.create_task(demo_purge_loop())
     yield
@@ -208,12 +244,24 @@ async def ui() -> FileResponse:
 @app.get("/demo-key")
 async def demo_key() -> dict:
     """Deliberately unauthenticated — hands out DEMO_API_KEY (if configured)
-    so a stranger trying the public dashboard doesn't need you to give them
-    a real credential first. See Settings.demo_api_key for why this is
-    opt-in and rate-capped. Returns {"api_key": null} if unconfigured; the
-    frontend then falls back to its normal "type your own key" behavior.
+    plus the seeded demo reviewer's token (see _ensure_demo_reviewer), so a
+    stranger trying the public dashboard doesn't need you to give them a
+    real credential for either header — without the reviewer token, a demo
+    visitor could submit tickets but could never actually approve/reject
+    the sensitive-action step a demo onboarding/offboarding ticket pauses
+    on, leaving every demo ticket stuck. Returns both as null if
+    unconfigured; the frontend then falls back to its normal
+    "type your own key/token" behavior.
     """
-    return {"api_key": get_settings().demo_api_key or None}
+    settings = get_settings()
+    reviewer_token: str | None = None
+    if settings.demo_api_key:
+        async with session_scope() as session:
+            reviewer = await session.scalar(
+                select(Reviewer).where(Reviewer.username == DEMO_REVIEWER_USERNAME)
+            )
+            reviewer_token = reviewer.token if reviewer is not None else None
+    return {"api_key": settings.demo_api_key or None, "reviewer_token": reviewer_token}
 
 
 async def _check_and_increment_daily_request_count(client: ApiClient | None) -> None:
@@ -427,9 +475,22 @@ async def get_ticket(ticket_id: int, client: ApiClient | None = Depends(require_
         return ticket
 
 
-@app.get("/employees", response_model=list[EmployeeOut], dependencies=[Depends(require_api_client)])
-async def list_employees(status: str | None = None) -> list[EmployeeUser]:
-    """Current (active) and past (disabled) employees in the mock identity store."""
+@app.get("/employees", response_model=list[EmployeeOut])
+async def list_employees(
+    status: str | None = None, client: ApiClient | None = Depends(require_api_client)
+) -> list[EmployeeUser]:
+    """Current (active) and past (disabled) employees in the mock identity store.
+
+    Previously had NO caller-scoping at all (dependencies=[Depends(require_api_client)]
+    only checked that SOME valid key was presented) — any authenticated
+    caller, including the low-privilege public DEMO_API_KEY, could read
+    every real employee's full name/email/department/access grants. Found
+    live: a demo-key visitor saw the actual company directory. Fixed the
+    same way as list_tickets/list_approvals: a STANDARD client only sees
+    employees IT created (EmployeeUser.owned_by_client_id, set by
+    identity_create_user — see app/mcp_server/tools.py's create_user).
+    ADMIN (and API_KEY-unset local demo mode) still sees everyone, as before.
+    """
     async with session_scope() as session:
         query = select(EmployeeUser).order_by(EmployeeUser.full_name)
         if status:
@@ -437,6 +498,8 @@ async def list_employees(status: str | None = None) -> list[EmployeeUser]:
                 query = query.where(EmployeeUser.status == UserStatus(status))
             except ValueError:
                 raise HTTPException(400, f"Invalid status: {status!r}")
+        if client is not None and client.role != ApiClientRole.ADMIN:
+            query = query.where(EmployeeUser.owned_by_client_id == client.id)
         rows = await session.scalars(query)
         return list(rows)
 
@@ -481,6 +544,30 @@ async def list_approvals(
         return list(rows)
 
 
+async def _authorize_demo_reviewer_scope(session, reviewer: Reviewer, approval: Approval) -> None:
+    """Additional restriction on top of authorize_reviewer, for the seeded
+    public demo reviewer ONLY (see _ensure_demo_reviewer): that reviewer is
+    role=IT_ADMIN so app/api/rbac.py's own rule would otherwise let it decide
+    ANY approval, real or demo. This closes that gap — the demo reviewer may
+    only decide approvals whose ticket is owned by the demo ApiClient, so a
+    public demo visitor holding this publicly-served token can never
+    approve/reject a real, non-demo sensitive action.
+
+    A no-op for every other reviewer (mchen/admin/anyone from db/seed.py) —
+    those keep whatever app/api/rbac.py's role-based rule already grants.
+    """
+    if reviewer.username != DEMO_REVIEWER_USERNAME:
+        return
+    demo_id = await _demo_client_id(session)
+    ticket = await session.get(Ticket, approval.ticket_id)
+    if demo_id is None or ticket is None or ticket.submitted_by_client_id != demo_id:
+        raise ApprovalNotAuthorizedError(
+            f"{reviewer.username!r} may only decide approvals on tickets submitted "
+            "via the public demo API key — not approval "
+            f"{approval.id}."
+        )
+
+
 @app.post(
     "/approvals/{approval_id}/decide",
     response_model=RunResult,
@@ -502,7 +589,9 @@ async def decide_approval(
     specific person rather than a self-asserted name anyone holding the
     shared API key could type in. From there, an it_admin reviewer may
     decide any sensitive approval; a manager reviewer may only decide
-    approvals targeting their own direct reports (app/api/rbac.py).
+    approvals targeting their own direct reports (app/api/rbac.py) — except
+    the seeded public demo reviewer, further confined to demo-owned tickets
+    only (see _authorize_demo_reviewer_scope).
     """
     async with session_scope() as session:
         approval = await session.get(Approval, approval_id)
@@ -513,6 +602,7 @@ async def decide_approval(
 
         try:
             await authorize_reviewer(session, reviewer.username, approval)
+            await _authorize_demo_reviewer_scope(session, reviewer, approval)
         except ApprovalNotAuthorizedError as exc:
             raise HTTPException(403, str(exc)) from exc
 
@@ -566,6 +656,7 @@ async def decide_approval_stream(
 
         try:
             await authorize_reviewer(session, reviewer.username, approval)
+            await _authorize_demo_reviewer_scope(session, reviewer, approval)
         except ApprovalNotAuthorizedError as exc:
             raise HTTPException(403, str(exc)) from exc
 

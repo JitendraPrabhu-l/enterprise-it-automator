@@ -146,6 +146,18 @@ async def create_user(
     if existing is not None:
         raise ToolError(f"User already exists: {username!r}")
 
+    # EmployeeUser.owned_by_client_id mirrors whoever owns the ticket that
+    # triggered this creation (Ticket.submitted_by_client_id) — NULL for a
+    # ticket with no attributable client (ADMIN/API_KEY-unset), or one
+    # submitted directly by an ADMIN. Set here rather than passed in as a
+    # tool arg: the LLM planner never sees or controls this value, exactly
+    # like ticket_id itself (see graph.py's _EXECUTOR_INJECTED_ARGS).
+    owned_by_client_id = None
+    if ticket_id is not None:
+        ticket = await session.get(Ticket, ticket_id)
+        if ticket is not None:
+            owned_by_client_id = ticket.submitted_by_client_id
+
     default_access = default_access_for_department(department)
     user = EmployeeUser(
         username=username,
@@ -154,6 +166,7 @@ async def create_user(
         department=department,
         status=UserStatus.ACTIVE,
         access_grants=default_access,
+        owned_by_client_id=owned_by_client_id,
     )
     session.add(user)
     await session.flush()

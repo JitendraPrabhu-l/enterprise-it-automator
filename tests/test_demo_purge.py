@@ -20,7 +20,7 @@ from sqlalchemy import select
 from app.agent.demo_purge import reset_demo_data_if_due
 from app.config import get_settings
 from app.db import session as db_session_module
-from app.db.models import ApiClient, ApiClientRole, Approval, AuditLog, Ticket, TicketStatus
+from app.db.models import ApiClient, ApiClientRole, Approval, AuditLog, EmployeeUser, Ticket, TicketStatus
 
 
 @pytest.fixture
@@ -38,6 +38,7 @@ async def app_client(monkeypatch, tmp_path):
     await db_session_module.init_db()
     await main_module._ensure_bootstrap_admin_client()
     await main_module._ensure_demo_guest_client()
+    await main_module._ensure_demo_reviewer()
 
     transport = httpx.ASGITransport(app=main_module.app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -268,3 +269,46 @@ async def test_trigger_demo_reset_endpoint_works_for_admin(app_client):
     resp = await ac.post("/admin/demo-reset", headers={"X-API-Key": "admin-bootstrap-key"})
     assert resp.status_code == 200
     assert resp.json() == {"tickets_purged": 1}
+
+
+async def _seed_demo_owned_employee(username: str = "demo-created-user") -> int:
+    demo_id = await _demo_client_id()
+    async with db_session_module.session_scope() as session:
+        employee = EmployeeUser(
+            username=username, full_name="Demo Created", email=f"{username}@example.com",
+            department="Engineering", owned_by_client_id=demo_id,
+        )
+        session.add(employee)
+        await session.flush()
+        return employee.id
+
+
+async def test_reset_also_purges_demo_owned_employees(app_client):
+    employee_id = await _seed_demo_owned_employee()
+
+    purged = await reset_demo_data_if_due()
+    assert purged >= 0  # tickets_purged count is unaffected by employee cleanup
+
+    async with db_session_module.session_scope() as session:
+        assert await session.get(EmployeeUser, employee_id) is None
+
+
+async def test_reset_never_touches_a_real_unowned_employee(app_client):
+    """EmployeeUser.owned_by_client_id is NULL for every seeded/real
+    employee (app/db/seed.py never sets it) — the purge must only ever
+    delete rows explicitly owned by the demo client, never NULL-owned
+    ones."""
+    async with db_session_module.session_scope() as session:
+        real_employee = EmployeeUser(
+            username="real-user", full_name="Real Person", email="real@example.com",
+            department="Sales", owned_by_client_id=None,
+        )
+        session.add(real_employee)
+        await session.flush()
+        real_employee_id = real_employee.id
+
+    await _seed_demo_owned_employee()
+    await reset_demo_data_if_due()
+
+    async with db_session_module.session_scope() as session:
+        assert await session.get(EmployeeUser, real_employee_id) is not None

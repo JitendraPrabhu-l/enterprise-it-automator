@@ -163,12 +163,17 @@ logs a warning at startup — only do this for a fully local, single-user demo.
 
 For a public deployment you want strangers to be able to try without asking
 you for a credential, set `DEMO_API_KEY` to a separate value — the dashboard
-auto-fills it for any visitor with no key of their own. It's seeded as a
-low-privilege client (can submit tickets, sees only tickets it filed itself,
-capped at 10 requests/day), never your real key. Its own tickets/approvals
+auto-fills it (plus a matching demo reviewer token, so a visitor can approve/
+reject their own tickets' sensitive steps too) for any visitor with no
+credentials of their own, and shows a persistent "DEMO MODE" banner while
+they're in use. It's seeded as a low-privilege client (can submit tickets,
+sees only tickets/employees/approvals it created itself, capped at 10
+requests/day), never your real key or reviewer token — the demo reviewer
+token is restricted to demo-owned approvals only, even though it otherwise
+carries admin-equivalent review rights. Its own tickets/approvals/employees
 are hard-deleted once a day and hidden from your admin key's default view in
-the meantime, so demo traffic never mixes with real data. See `.env.example`
-and `DEPLOYMENT.md`.
+the meantime, so demo traffic never mixes with or can affect real data. See
+`.env.example` and `DEPLOYMENT.md`.
 
 Seed a couple of mock employees and run the API:
 

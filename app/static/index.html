@@ -71,9 +71,24 @@
   .audit-detail { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
   .audit-row { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
   .link-btn { background: none; color: var(--accent); padding: 0; font-weight: 400; text-decoration: underline; font-size: 11px; }
+  #demoModeBanner {
+    display: none; align-items: center; gap: 8px; padding: 8px 24px;
+    background: rgba(245,166,35,.12); border-bottom: 1px solid var(--warn);
+    color: var(--warn); font-size: 12px; font-weight: 700; letter-spacing: .03em;
+  }
+  #demoModeBanner .dot {
+    width: 8px; height: 8px; border-radius: 999px; background: var(--warn);
+    animation: demo-blink 1.2s ease-in-out infinite;
+  }
+  @keyframes demo-blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+  @media (prefers-reduced-motion: reduce) {
+    #demoModeBanner .dot { animation: none; }
+  }
 </style>
 </head>
 <body>
+
+<div id="demoModeBanner"><span class="dot"></span><span>DEMO MODE — using the public demo API key and reviewer token; your tickets/approvals/employees are isolated from real data and deleted within 24h</span></div>
 
 <header>
   <div style="display:flex; justify-content:space-between; align-items:flex-end; gap:16px; flex-wrap:wrap;">
@@ -180,35 +195,57 @@ apiKeyInput.addEventListener("input", () => {
   // Once a visitor types their own key, stop treating this browser as
   // "on the public demo key" — see autoFillDemoKeyIfAvailable below.
   localStorage.setItem("apiKeyManuallySet", "1");
+  updateDemoModeBanner();
 });
 
 const reviewerInput = document.getElementById("reviewerInput");
 reviewerInput.value = localStorage.getItem("reviewerToken") || "";
 reviewerInput.addEventListener("input", () => {
   localStorage.setItem("reviewerToken", reviewerInput.value);
+  // Same manual-override guard as apiKeyInput above, for the reviewer token.
+  localStorage.setItem("reviewerTokenManuallySet", "1");
+  updateDemoModeBanner();
 });
+
+// Cached across autoFillDemoKeyIfAvailable and updateDemoModeBanner so the
+// banner can tell "currently on the demo key" apart from "typed a value
+// that happens to match" without a second fetch.
+let knownDemoApiKey = null;
+
+function updateDemoModeBanner() {
+  const banner = document.getElementById("demoModeBanner");
+  const onDemoKey = !!knownDemoApiKey && apiKeyInput.value === knownDemoApiKey;
+  banner.style.display = onDemoKey ? "flex" : "none";
+}
 
 async function autoFillDemoKeyIfAvailable() {
   // Public portfolio deployments can opt into DEMO_API_KEY (see
   // app/config.py) so a stranger can try the app without asking for a real
-  // credential first. Only auto-fills if this browser has never had a key
-  // typed into it manually — a visitor who pastes in their own real key
-  // must never have it silently overwritten by a later page load.
-  if (apiKeyInput.value || localStorage.getItem("apiKeyManuallySet")) return;
+  // credential first. Only auto-fills if this browser has never had a
+  // value typed into it manually — a visitor who pastes in their own real
+  // key/token must never have it silently overwritten by a later page load.
   try {
     const res = await fetch("/demo-key");
     const data = await res.json();
-    if (data.api_key) {
+    knownDemoApiKey = data.api_key || null;
+    if (data.api_key && !apiKeyInput.value && !localStorage.getItem("apiKeyManuallySet")) {
       apiKeyInput.value = data.api_key;
       localStorage.setItem("apiKey", data.api_key);
+    }
+    if (data.reviewer_token && !reviewerInput.value && !localStorage.getItem("reviewerTokenManuallySet")) {
+      reviewerInput.value = data.reviewer_token;
+      localStorage.setItem("reviewerToken", data.reviewer_token);
+    }
+    if (data.api_key) {
       const note = document.getElementById("demoKeyNote");
-      note.textContent = "Using the public read-only demo key — you can only see tickets you submit yourself. Approving/rejecting still needs a real reviewer token.";
+      note.textContent = "Using the public demo key and reviewer token — your tickets, approvals, and any employees you create are isolated from real data and hard-deleted within 24h. They can never affect or reveal real operational data.";
       note.style.display = "block";
     }
   } catch (e) {
-    // No demo key configured, or the request failed — the field just
-    // stays empty, same as before this existed.
+    // No demo key configured, or the request failed — the fields just
+    // stay empty, same as before this existed.
   }
+  updateDemoModeBanner();
 }
 
 async function api(path, opts) {

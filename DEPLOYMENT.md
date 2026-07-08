@@ -164,14 +164,24 @@ python -c "import secrets; print(secrets.token_urlsafe(24))"
 ```
 
 The dashboard then auto-fills this key for any visitor with no key of their own. It's
-seeded as a low-privilege client (can submit tickets and see only tickets it filed
-itself, capped at 10 requests/day) — never your real admin key. Leave `DEMO_API_KEY`
-unset to keep the dashboard requiring a real key from every visitor, as before.
+seeded as a low-privilege client (can submit tickets and see only tickets, employees,
+and approvals it created itself, capped at 10 requests/day) — never your real admin
+key. Leave `DEMO_API_KEY` unset to keep the dashboard requiring a real key from every
+visitor, as before.
 
-Demo tickets/approvals/audit entries are hard-deleted once a day (`DEMO_DATA_RESET_HOURS`,
-default 24h) so public demo traffic never accumulates alongside your real data — they're
-also hidden from your admin key's default `/tickets` and `/approvals` view (pass
-`?include_demo=true` to see them). To force a reset immediately instead of waiting for the
+A matching demo **reviewer token** is seeded and served alongside it (also returned by
+`GET /demo-key`, and auto-filled into the dashboard's Reviewer token field), so a demo
+visitor can approve/reject their own tickets' sensitive-action steps end-to-end without
+ever being handed a real reviewer's credential — that token is restricted to deciding
+demo-owned approvals only; it cannot approve/reject a real ticket's approval, even
+though it otherwise carries an `it_admin`-equivalent role. The dashboard shows a
+persistent "DEMO MODE" banner whenever the auto-filled demo key/token are in use.
+
+Demo tickets/approvals/audit entries and any employees created via a demo ticket are
+hard-deleted once a day (`DEMO_DATA_RESET_HOURS`, default 24h) so public demo traffic
+never accumulates alongside your real data — they're also hidden from your admin key's
+default `/tickets`, `/approvals`, and `/employees` views (pass `?include_demo=true` to
+reveal demo tickets/approvals). To force a reset immediately instead of waiting for the
 daily sweep, `POST /admin/demo-reset` with your admin `API_KEY`.
 
 ### Full environment variable list
