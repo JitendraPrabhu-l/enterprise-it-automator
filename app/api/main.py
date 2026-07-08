@@ -486,7 +486,9 @@ async def get_ticket(ticket_id: int, client: ApiClient | None = Depends(require_
 
 @app.get("/employees", response_model=list[EmployeeOut])
 async def list_employees(
-    status: str | None = None, client: ApiClient | None = Depends(require_api_client)
+    status: str | None = None,
+    include_demo: bool = False,
+    client: ApiClient | None = Depends(require_api_client),
 ) -> list[EmployeeUser]:
     """Current (active) and past (disabled) employees in the mock identity store.
 
@@ -498,7 +500,13 @@ async def list_employees(
     same way as list_tickets/list_approvals: a STANDARD client only sees
     employees IT created (EmployeeUser.owned_by_client_id, set by
     identity_create_user — see app/mcp_server/tools.py's create_user).
-    ADMIN (and API_KEY-unset local demo mode) still sees everyone, as before.
+    ADMIN (and API_KEY-unset local demo mode) still sees everyone by
+    default, EXCEPT the public demo client's own employees, hidden the same
+    way as list_tickets/list_approvals' include_demo param (pass
+    include_demo=true to reveal them) — found live: a demo visitor's
+    onboarding-created employee (e.g. a fictional "tuser") showed up
+    unfiltered in the admin's own employee directory, inconsistent with how
+    demo tickets/approvals are already hidden by default there.
     """
     async with session_scope() as session:
         query = select(EmployeeUser).order_by(EmployeeUser.full_name)
@@ -509,6 +517,13 @@ async def list_employees(
                 raise HTTPException(400, f"Invalid status: {status!r}")
         if client is not None and client.role != ApiClientRole.ADMIN:
             query = query.where(EmployeeUser.owned_by_client_id == client.id)
+        elif not include_demo:
+            demo_id = await _demo_client_id(session)
+            if demo_id is not None:
+                # IS DISTINCT FROM — see list_tickets's identical comment
+                # for why plain != would incorrectly hide NULL-owned
+                # (pre-existing/unattributed) employee rows too.
+                query = query.where(EmployeeUser.owned_by_client_id.is_distinct_from(demo_id))
         rows = await session.scalars(query)
         return list(rows)
 

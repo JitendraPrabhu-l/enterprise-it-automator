@@ -83,13 +83,31 @@ async def _seed_employee(username: str, owned_by_client_id: int | None) -> int:
 # --- GET /employees scoping ---------------------------------------------
 
 
-async def test_admin_sees_every_employee_regardless_of_owner(app_client):
+async def test_admin_default_view_hides_demo_created_employees(app_client):
+    """Consistency fix: list_tickets/list_approvals already hide the public
+    demo client's own rows from ADMIN's default view — list_employees
+    didn't, so a demo visitor's onboarding-created employee (e.g. a
+    fictional "tuser") showed up unfiltered in the admin's own directory.
+    Found live after the enable_user feature let a demo visitor complete a
+    full onboarding flow."""
     ac, _ = app_client
     await _seed_employee("real1", owned_by_client_id=None)
     demo_id = await _client_id_for_key("public-demo-key")
     await _seed_employee("demo1", owned_by_client_id=demo_id)
 
     resp = await ac.get("/employees", headers={"X-API-Key": "admin-bootstrap-key"})
+    assert resp.status_code == 200
+    usernames = {e["username"] for e in resp.json()}
+    assert usernames == {"real1"}
+
+
+async def test_admin_can_opt_into_seeing_demo_created_employees(app_client):
+    ac, _ = app_client
+    await _seed_employee("real1", owned_by_client_id=None)
+    demo_id = await _client_id_for_key("public-demo-key")
+    await _seed_employee("demo1", owned_by_client_id=demo_id)
+
+    resp = await ac.get("/employees?include_demo=true", headers={"X-API-Key": "admin-bootstrap-key"})
     assert resp.status_code == 200
     usernames = {e["username"] for e in resp.json()}
     assert usernames == {"real1", "demo1"}
