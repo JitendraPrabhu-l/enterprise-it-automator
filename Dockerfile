@@ -2,7 +2,7 @@
 # the runtime stage copies only that venv + app code onto a slim base —
 # keeps the final image free of build tooling (gcc, pip cache, etc.).
 
-FROM python:3.13-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /build
 
@@ -12,7 +12,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY requirements.lock.txt .
 RUN pip install --no-cache-dir -r requirements.lock.txt
 
-FROM python:3.13-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 RUN groupadd --system app && useradd --system --gid app --create-home app
 
