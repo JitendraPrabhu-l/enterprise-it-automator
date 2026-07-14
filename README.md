@@ -618,6 +618,28 @@ deliberately skipped rather than silently missing:
   reply-to-decide mechanism, since replying to an email isn't a safe way to
   authenticate a decision; the dashboard and Telegram remain the only ways
   to actually approve/reject.
+- **Security headers on every response** (`app/api/main.py`'s
+  `security_headers_middleware`) — `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, a same-origin `Content-Security-Policy` scoped to
+  what the single-page dashboard actually needs, `Referrer-Policy`, and
+  HSTS. Standard defense-in-depth table stakes for an enterprise security
+  review, applied regardless of route or auth outcome.
+- **Security-event audit trail** (`app/api/security_audit.py`) — reuses the
+  existing `AuditLog` table for identity/auth events, not just tool
+  invocations: invalid API keys, invalid reviewer tokens, rejected OIDC
+  bearer tokens, every approval decision (with auth method recorded), and
+  Telegram account-linking attempts. Same table, same admin query surface —
+  a security review doesn't need a second log store to answer "who tried
+  what."
+- **Compliance audit export** (`GET /audit/export`, ADMIN-only) — streams
+  the full audit log (every ticket's tool invocations plus every security
+  event above) as JSONL or CSV, optionally time-range filtered
+  (`?since=&until=`), for SIEM/compliance ingestion. Unlike
+  `GET /tickets/{id}/audit`'s per-caller scoping (any authenticated client
+  may read its own tickets), this endpoint spans every ticket and caller —
+  restricted to admins, matching what a SOC 2 audit expects. The export
+  call itself writes a `audit_log_exported` security event, so "who
+  exported the log, and when" is itself answerable from the log.
 - **Approval replay prevention** (`app/mcp_server/approval_gate.py`) — an
   `Approval`'s `executed_at` is set the first time it authorizes a
   sensitive tool call; a second attempt to use the same `approval_id` is

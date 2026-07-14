@@ -49,6 +49,12 @@ by tests:
   update PRs that must pass the full gate (ruff, mypy, pytest+coverage).
 - Images are Trivy-scanned (fail on fixable HIGH/CRITICAL) *before* being
   pushed to GHCR; releases are semver-tagged images built from the tag.
+- Tagged releases are keylessly signed with cosign (GitHub OIDC → Sigstore,
+  no stored signing key) and carry a signed SBOM (SPDX) and SLSA provenance
+  attestation, both keyed to the immutable push digest — verify with
+  `cosign verify`/`cosign verify-attestation` against
+  `ghcr.io/<repo>@<digest>` (see `.github/workflows/release.yml`'s
+  comments for the exact identity/issuer to check against).
 - Containers run as a non-root user; the Helm chart drops all capabilities
   and sets `runAsNonRoot`/seccomp defaults.
 - Secrets are env-injected (never baked into images or committed);

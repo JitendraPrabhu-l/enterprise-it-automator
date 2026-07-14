@@ -25,6 +25,7 @@ from app.agent.sla_sweep import run_sla_sweep, sla_sweep_loop
 from app.api.auth import AuthenticatedReviewer, require_api_client, require_reviewer
 from app.api.idempotency import get_cached_response, store_response
 from app.api.rbac import ApprovalNotAuthorizedError, authorize_reviewer
+from app.api.security_audit import record_security_event
 from app.api.schemas import (
     ApprovalDecision,
     ApprovalOut,
@@ -189,6 +190,36 @@ app.state.limiter = limiter
 app.add_exception_handler(
     RateLimitExceeded, cast("Callable[[Request, Exception], Response]", _rate_limit_exceeded_handler)
 )
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Standard defense-in-depth response headers on every request —
+    table-stakes for an enterprise security review, cheap to add, and
+    independent of any per-route auth logic above. CSP is scoped to what
+    app/static/index.html (the only HTML this app serves) actually needs:
+    it's a single self-contained page with inline <style>/<script> and no
+    external resources, so 'unsafe-inline' is required for style-src/
+    script-src here — not a general allowance, since script-src still
+    excludes any other origin. HSTS is safe to send unconditionally: it's a
+    no-op over plain HTTP (browsers only honor it on responses actually
+    received over TLS), and every real deployment of this app (Render, the
+    Helm chart's ingress) terminates TLS in front of it.
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'"
+    )
+    return response
 
 
 @app.middleware("http")
@@ -696,6 +727,12 @@ async def _decide_approval_core(
                     f"Sensitive action {approval.tool_name} rejected by {reviewer.username}."
                 )
 
+    await record_security_event(
+        actor=f"reviewer:{reviewer.username}",
+        event="approval_approved" if approve else "approval_rejected",
+        detail=f"approval={approval_id} auth_method={auth_method} tool={approval.tool_name}",
+        success=True,
+    )
     metrics.APPROVALS_DECIDED.labels(decision="approved" if approve else "rejected").inc()
     return ticket_id
 
@@ -800,6 +837,12 @@ async def decide_approval_stream(
                     f"Sensitive action {approval.tool_name} rejected by {reviewer.username}."
                 )
 
+    await record_security_event(
+        actor=f"reviewer:{reviewer.username}",
+        event="approval_approved" if payload.approve else "approval_rejected",
+        detail=f"approval={approval_id} auth_method={authed.auth_method} tool={approval.tool_name}",
+        success=True,
+    )
     metrics.APPROVALS_DECIDED.labels(decision="approved" if payload.approve else "rejected").inc()
     encoder = EventEncoder()
     run_id = str(uuid.uuid4())
@@ -846,6 +889,84 @@ async def get_ticket_audit(
             select(AuditLog).where(AuditLog.ticket_id == ticket_id).order_by(AuditLog.created_at)
         )
         return list(rows)
+
+
+@app.get("/audit/export")
+@limiter.limit("10/minute")
+async def export_audit_log(
+    request: Request,
+    format: str = "jsonl",
+    since: dt.datetime | None = None,
+    until: dt.datetime | None = None,
+    client: ApiClient | None = Depends(require_api_client),
+) -> StreamingResponse:
+    """Streams the FULL audit log (every ticket's tool-invocation rows, plus
+    the security events from app/api/security_audit.py — auth failures,
+    approval decisions, Telegram link attempts) as JSONL or CSV, for
+    compliance/SIEM ingestion.
+
+    Deliberately ADMIN-only, unlike GET /tickets/{id}/audit's per-caller
+    scoping (that endpoint intentionally still lets any authenticated
+    STANDARD client read its OWN tickets' audit trail) — this endpoint
+    spans every ticket and every security event across every caller, which
+    is exactly the kind of broad read a compliance/SOC-2 audit expects to
+    be restricted to admins, not "anyone holding a valid API key." Rate-
+    limited because it can stream the entire table; unbounded polling of a
+    full-log export is itself a thing worth bounding.
+
+    The export call itself is logged as its own security event (actor,
+    format, time range) — a SOC 2 auditor's next question after "can you
+    export the audit log" is always "and who has exported it, when."
+    """
+    if client is None or client.role != ApiClientRole.ADMIN:
+        raise HTTPException(403, "Only an admin API client may export the audit log.")
+    if format not in ("jsonl", "csv"):
+        raise HTTPException(400, "format must be 'jsonl' or 'csv'")
+
+    await record_security_event(
+        actor=f"api_client:{client.name}",
+        event="audit_log_exported",
+        detail=f"format={format} since={since} until={until}",
+        success=True,
+    )
+
+    async def _rows():
+        async with session_scope() as session:
+            stmt = select(AuditLog).order_by(AuditLog.created_at)
+            if since is not None:
+                stmt = stmt.where(AuditLog.created_at >= since)
+            if until is not None:
+                stmt = stmt.where(AuditLog.created_at <= until)
+            result = await session.stream_scalars(stmt)
+            async for row in result:
+                yield row
+
+    if format == "jsonl":
+
+        async def _jsonl():
+            async for row in _rows():
+                yield AuditLogOut.model_validate(row).model_dump_json() + "\n"
+
+        return StreamingResponse(_jsonl(), media_type="application/x-ndjson")
+
+    async def _csv():
+        import csv
+        import io
+
+        header_buf = io.StringIO()
+        writer = csv.writer(header_buf)
+        writer.writerow(["id", "ticket_id", "actor", "tool_name", "result", "success", "created_at"])
+        yield header_buf.getvalue()
+
+        async for row in _rows():
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(
+                [row.id, row.ticket_id, row.actor, row.tool_name, row.result, row.success, row.created_at.isoformat()]
+            )
+            yield buf.getvalue()
+
+    return StreamingResponse(_csv(), media_type="text/csv")
 
 
 @app.post(
@@ -905,6 +1026,7 @@ async def _handle_telegram_start(session, chat_id: str, token_text: str) -> None
     token = token_text.strip()
     reviewer = await session.scalar(select(Reviewer).where(Reviewer.token == token))
     if reviewer is None:
+        await record_security_event(actor="telegram_link", event="invalid_reviewer_token")
         await send_decision_confirmation(
             chat_id, approval_id=0, approved=False,
             detail="Invalid reviewer token. Check the token from `python -m app.db.seed` and try again.",
@@ -912,6 +1034,9 @@ async def _handle_telegram_start(session, chat_id: str, token_text: str) -> None
         return
     reviewer.telegram_chat_id = str(chat_id)
     await session.flush()
+    await record_security_event(
+        actor="telegram_link", event="chat_linked", detail=reviewer.username, success=True
+    )
     await send_decision_confirmation(
         chat_id, approval_id=0, approved=True,
         detail=f"Linked as reviewer {reviewer.username!r}. You'll now get pending approvals here.",

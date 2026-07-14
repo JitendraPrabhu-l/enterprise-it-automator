@@ -22,6 +22,7 @@ from fastapi import Header, HTTPException
 from sqlalchemy import select
 
 from app.api.oidc import OIDCVerificationError, verify_oidc_token
+from app.api.security_audit import record_security_event
 from app.config import get_settings
 from app.db.models import ApiClient, Reviewer
 from app.db.session import session_scope
@@ -58,6 +59,7 @@ async def require_api_client(x_api_key: str | None = Header(default=None)) -> Ap
     async with session_scope() as session:
         client = await session.scalar(select(ApiClient).where(ApiClient.key == x_api_key))
     if client is None:
+        await record_security_event(actor="auth", event="invalid_api_key")
         raise HTTPException(401, "Missing or invalid API key")
     return client
 
@@ -85,6 +87,7 @@ async def require_reviewer_token(x_reviewer_token: str | None = Header(default=N
     async with session_scope() as session:
         reviewer = await session.scalar(select(Reviewer).where(Reviewer.token == x_reviewer_token))
     if reviewer is None:
+        await record_security_event(actor="auth", event="invalid_reviewer_token")
         raise HTTPException(401, "Invalid reviewer token.")
     return reviewer
 
@@ -120,6 +123,7 @@ async def require_reviewer(
             claims = await verify_oidc_token(token)
         except OIDCVerificationError as exc:
             logger.warning("OIDC bearer token rejected: %s", exc)
+            await record_security_event(actor="auth", event="oidc_token_rejected", detail=str(exc))
             raise HTTPException(401, "OIDC bearer token rejected.") from exc
         username = claims.get(settings.oidc_username_claim)
         if not username:
@@ -133,6 +137,9 @@ async def require_reviewer(
         if reviewer is None:
             # 403, not 401: authentication SUCCEEDED (the IdP vouched for
             # this person) — they're just not authorized to review here.
+            await record_security_event(
+                actor="auth", event="oidc_identity_not_a_reviewer", detail=username
+            )
             raise HTTPException(403, f"{username!r} is not a registered reviewer.")
         return AuthenticatedReviewer(
             reviewer=reviewer, auth_method="oidc", oidc_subject=claims.get("sub")

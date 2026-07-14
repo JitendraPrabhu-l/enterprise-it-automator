@@ -1,11 +1,15 @@
 name: Release
 
 # Tag-driven releases: pushing v1.2.3 builds the image from that exact
-# commit, scans it, publishes ghcr.io/<repo>:1.2.3 (+ :latest), and opens a
-# GitHub Release with generated notes. Continuous deployment of :latest on
-# main (deploy.yml) stays as the fast path; tags are the auditable,
-# rollback-able promotion path — `docker run ghcr.io/<repo>:1.2.2` IS the
-# rollback procedure (see docs/RUNBOOKS.md).
+# commit, scans it, publishes ghcr.io/<repo>:1.2.3 (+ :latest), keylessly
+# signs the image and attaches a signed SBOM + SLSA provenance attestation
+# (all keyed to the push digest, not the mutable tag), and opens a GitHub
+# Release with generated notes plus the SBOM as a downloadable asset.
+# Continuous deployment of :latest on main (deploy.yml) stays as the fast
+# path; tags are the auditable, rollback-able, ATTESTED promotion path —
+# `docker run ghcr.io/<repo>:1.2.2` IS the rollback procedure (see
+# docs/RUNBOOKS.md), and `cosign verify`/`cosign verify-attestation`
+# against any past digest is the provenance-check procedure.
 on:
   push:
     tags: ["v*.*.*"]
@@ -13,6 +17,10 @@ on:
 permissions:
   contents: write
   packages: write
+  # For cosign keyless signing: the workflow exchanges its GitHub OIDC
+  # identity token for a short-lived Sigstore certificate — no long-lived
+  # signing key to store, rotate, or leak.
+  id-token: write
 
 jobs:
   release:
@@ -54,6 +62,7 @@ jobs:
           exit-code: "1"
 
       - name: Push release image
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -63,7 +72,77 @@ jobs:
             ghcr.io/${{ steps.meta.outputs.name }}:latest
           cache-from: type=gha
 
+      # --- Supply-chain attestation ---------------------------------------
+      # Three artifacts an enterprise procurement/security review expects
+      # before pulling a third-party image: what's inside it (SBOM), that
+      # it hasn't been tampered with since this exact CI run built it
+      # (signature), and how it was built (provenance). All three are keyed
+      # to the DIGEST from the push step above, not the mutable :latest or
+      # :<version> tag — a tag can be moved to point at a different image
+      # later; a digest can't.
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.0
+
+      - name: Sign image (keyless)
+        # Keyless: cosign exchanges this workflow's GitHub OIDC identity
+        # token (id-token: write, granted above) for a short-lived Sigstore
+        # certificate and records the signature in the public Rekor
+        # transparency log — no long-lived private signing key for this
+        # repo to generate, store as a secret, or ever leak. Verify with:
+        #   cosign verify ghcr.io/<repo>@<digest> \
+        #     --certificate-identity-regexp 'https://github.com/<repo>/.*' \
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+        run: |
+          cosign sign --yes "ghcr.io/${{ steps.meta.outputs.name }}@${{ steps.push.outputs.digest }}"
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ steps.meta.outputs.name }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Attach SBOM to the image (keyless)
+        # A signed SBOM attestation lets `cosign verify-attestation` (or any
+        # SLSA-aware scanner) fetch and verify the SBOM straight from the
+        # registry, not just from this run's release assets — the two are
+        # redundant on purpose: the release asset is for a human to read,
+        # the attestation is for tooling to verify.
+        run: |
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "ghcr.io/${{ steps.meta.outputs.name }}@${{ steps.push.outputs.digest }}"
+
+      - name: Generate SLSA provenance predicate
+        run: |
+          cat > provenance.json <<EOF
+          {
+            "buildType": "https://github.com/actions/runner",
+            "builder": { "id": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" },
+            "invocation": {
+              "configSource": {
+                "uri": "git+https://github.com/${{ github.repository }}@${{ github.ref }}",
+                "digest": { "sha1": "${{ github.sha }}" }
+              }
+            },
+            "metadata": {
+              "buildInvocationId": "${{ github.run_id }}-${{ github.run_attempt }}",
+              "completeness": { "parameters": true, "environment": false, "materials": false }
+            }
+          }
+          EOF
+
+      - name: Attach provenance attestation (keyless)
+        run: |
+          cosign attest --yes \
+            --predicate provenance.json \
+            --type slsaprovenance \
+            "ghcr.io/${{ steps.meta.outputs.name }}@${{ steps.push.outputs.digest }}"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          files: sbom.spdx.json
