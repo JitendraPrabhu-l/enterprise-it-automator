@@ -119,7 +119,7 @@ async def test_graph_fails_ticket_when_budget_spent(monkeypatch):
 
     # One classify call at 60 tokens -> budget (50) already spent by plan time.
     llm = _MeteredLLM(replies=["ACCESS_CHANGE"], tokens_per_call=60)
-    monkeypatch.setattr(graph_module, "get_llm", lambda: llm)
+    monkeypatch.setattr(graph_module, "FallbackLLM", lambda: llm)
 
     graph = compile_graph(checkpointer=InMemorySaver())
     token_budget.start_accounting(0)
@@ -153,7 +153,7 @@ async def test_graph_completes_normally_when_budget_disabled(monkeypatch):
         [{"tool": "access_grant_access", "args": {"username": "tuser", "resource": "vpn"}, "reasoning": "r"}]
     )
     llm = _MeteredLLM(replies=["ACCESS_CHANGE", "tuser", plan], tokens_per_call=60)
-    monkeypatch.setattr(graph_module, "get_llm", lambda: llm)
+    monkeypatch.setattr(graph_module, "FallbackLLM", lambda: llm)
 
     graph = compile_graph(checkpointer=InMemorySaver())
     token_budget.start_accounting(0)
@@ -181,7 +181,7 @@ async def test_budget_metric_increments_on_abort(monkeypatch):
     _patch_mcp(monkeypatch)
 
     llm = _MeteredLLM(replies=["ACCESS_CHANGE"], tokens_per_call=60)
-    monkeypatch.setattr(graph_module, "get_llm", lambda: llm)
+    monkeypatch.setattr(graph_module, "FallbackLLM", lambda: llm)
 
     before = _sample("ticket_token_budget_exceeded_total")
     graph = compile_graph(checkpointer=InMemorySaver())

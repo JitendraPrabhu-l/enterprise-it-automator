@@ -511,11 +511,11 @@ unmatched-path probing can't mint unbounded timeseries), the domain series
 are the interesting ones: `tickets_finalized_total{status}`,
 `approvals_pending` / `approvals_decided_total` / `approvals_escalated_total`,
 `mcp_tool_calls_total{tool,outcome}`, `mcp_circuit_breaker_open{domain}`,
-`llm_tokens_total{model,direction}`, and
-`ticket_token_budget_exceeded_total`. The metric increments live at the
+`llm_tokens_total{model,direction}`, `llm_fallback_total{primary,served_by}`,
+and `ticket_token_budget_exceeded_total`. The metric increments live at the
 same call sites as the tracing spans, so the two signals can't drift.
 
-A ready-made stack ships as a compose overlay — Prometheus with seven alert
+A ready-made stack ships as a compose overlay — Prometheus with eight alert
 rules (each annotated with its [runbook entry](docs/RUNBOOKS.md#alerts)),
 Alertmanager, and Grafana with a provisioned overview dashboard:
 
@@ -877,3 +877,24 @@ needs only an API key (no card) and exposes several free-tier models
 OpenAI-compatible API — `_build_openrouter` in `app/agent/llm.py` reuses
 `ChatOpenAI` pointed at OpenRouter's `base_url` rather than adding a new
 SDK dependency.
+
+**Automatic runtime failover between providers** (distinct from the
+`LLM_PROVIDER=openrouter` manual fallback choice above, which is something
+*you* configure ahead of time): every agent node calls the LLM through
+`app/agent/llm.py`'s `ainvoke_with_fallback`, not a raw provider client
+directly. If the configured `LLM_PROVIDER` fails (after the node-level
+`RetryPolicy`'s own retry-with-backoff is exhausted — that's still the
+first line of defense for a transient blip against the *same* provider),
+it automatically tries every OTHER provider with credentials set in
+`.env`, in a fixed preference order (`groq → openrouter → anthropic →
+watsonx`), gated by a per-provider circuit breaker (`llm:<provider>`,
+reusing the same three-state breaker machinery already proven for MCP
+domain isolation — see **MCP transport** below). A `llm_fallback_total`
+counter (labeled `primary`/`served_by`) and a warn-severity
+`LlmFallbackActive` alert fire whenever a call is actually served by a
+non-primary provider, since sustained fallback traffic means the
+configured primary is degraded and you're now running on a different
+model's quality/cost profile than intended. Fully additive: with only one
+provider's credentials configured (the common case), the candidate list
+has exactly one entry and behavior is unchanged from calling the primary
+directly.

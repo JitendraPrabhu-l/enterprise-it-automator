@@ -113,6 +113,15 @@ CIRCUIT_BREAKER_OPEN = Gauge(
     multiprocess_mode="max",
 )
 
+LLM_FALLBACK_TOTAL = Counter(
+    "llm_fallback_total",
+    "LLM calls served by a NON-primary provider after the configured "
+    "primary failed — see app/agent/llm.py's ainvoke_with_fallback. Any "
+    "sustained nonzero rate here means the configured LLM_PROVIDER is "
+    "degraded/down and traffic is running on a fallback.",
+    ["primary", "served_by"],
+)
+
 
 def render_metrics() -> tuple[bytes, str]:
     """Returns (payload, content_type) for GET /metrics. In multiprocess

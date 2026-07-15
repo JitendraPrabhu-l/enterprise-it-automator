@@ -1,16 +1,16 @@
 import pytest
 
-from app.agent.llm import get_llm
+from app.agent.llm import get_llm, get_llm_for_provider
 from app.config import get_settings
 
 
 @pytest.fixture(autouse=True)
 def _clear_caches():
     get_settings.cache_clear()
-    get_llm.cache_clear()
+    get_llm_for_provider.cache_clear()
     yield
     get_settings.cache_clear()
-    get_llm.cache_clear()
+    get_llm_for_provider.cache_clear()
 
 
 async def test_unknown_provider_raises(monkeypatch):

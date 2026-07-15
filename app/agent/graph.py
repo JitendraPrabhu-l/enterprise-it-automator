@@ -55,7 +55,7 @@ from langgraph.types import RetryPolicy, Send, interrupt
 
 from app import metrics
 from app.agent import token_budget
-from app.agent.llm import get_llm
+from app.agent.llm import FallbackLLM
 from app.agent.mcp_client import call_tool, is_transient_error, list_tools, mcp_session
 from app.agent.mcp_session_cache import get_cached_proxy
 from app.agent.prompts.access_change import ACCESS_CHANGE_PLANNER_PROMPT
@@ -171,6 +171,20 @@ def _llm_model_name() -> str:
         "watsonx": settings.watsonx_model,
         "openrouter": settings.openrouter_model,
     }.get(provider, provider)
+
+
+def _served_model_name(llm) -> str:
+    """Model name for metrics/tracing attribution on a call that just went
+    through `llm`. If `llm` is a FallbackLLM, its last_model_name reflects
+    whichever provider ACTUALLY served the call — which can differ from
+    the configured primary once a fallback has fired — so this is
+    preferred over the primary-only _llm_model_name() wherever the llm
+    object is available. Test doubles (_FakeLLM in tests/test_classify.py,
+    tests/test_graph_routing.py) have no such attribute and fall back to
+    _llm_model_name(), which is fine there since those tests never involve
+    a real provider/fallback in the first place.
+    """
+    return getattr(llm, "last_model_name", None) or _llm_model_name()
 
 
 def _unwrap_exception(exc: BaseException) -> BaseException:
@@ -334,7 +348,7 @@ async def _extract_username(llm, ticket_text: str) -> str | None:
             HumanMessage(content=_wrap_untrusted_ticket_text(ticket_text)),
         ]
     )
-    record_llm_call("extract_username", _llm_model_name(), response)
+    record_llm_call("extract_username", _served_model_name(llm), response)
     raw = response.content if isinstance(response.content, str) else str(response.content)
     stripped = raw.strip()
     if not stripped:
@@ -477,7 +491,7 @@ async def classify_ticket_category(llm, ticket_text: str) -> TicketCategory:
             HumanMessage(content=_wrap_untrusted_ticket_text(ticket_text)),
         ]
     )
-    record_llm_call("classify", _llm_model_name(), response)
+    record_llm_call("classify", _served_model_name(llm), response)
     raw = response.content if isinstance(response.content, str) else str(response.content)
     normalized = raw.strip().upper().strip('"').strip("'")
     if normalized in CATEGORY_PROMPTS:
@@ -487,7 +501,7 @@ async def classify_ticket_category(llm, ticket_text: str) -> TicketCategory:
 
 
 async def classify_node(state: AgentState) -> dict:
-    llm = get_llm()
+    llm = FallbackLLM()
     category = await classify_ticket_category(llm, state["ticket_text"])
     return {"category": category}
 
@@ -516,7 +530,7 @@ async def plan_node(state: AgentState) -> dict:
     if token_budget.budget_exceeded():
         return _budget_exhausted_update(state)
 
-    llm = get_llm()
+    llm = FallbackLLM()
 
     username = await _extract_username(llm, state["ticket_text"])
     observation = (
@@ -538,7 +552,7 @@ async def plan_node(state: AgentState) -> dict:
             ),
         ]
     )
-    record_llm_call("plan", _llm_model_name(), response)
+    record_llm_call("plan", _served_model_name(llm), response)
     raw = response.content if isinstance(response.content, str) else str(response.content)
 
     tokens_used = token_budget.current_total() or state.get("tokens_used", 0)
@@ -830,7 +844,7 @@ async def replan_node(state: AgentState) -> dict:
     if token_budget.budget_exceeded():
         return _budget_exhausted_update(state)
 
-    llm = get_llm()
+    llm = FallbackLLM()
     results = state.get("results", [])
     progress_lines = [
         f"- {r['tool']}({r['args']}) -> "
@@ -863,7 +877,7 @@ async def replan_node(state: AgentState) -> dict:
             HumanMessage(content=replan_prompt),
         ]
     )
-    record_llm_call("replan", _llm_model_name(), response)
+    record_llm_call("replan", _served_model_name(llm), response)
     raw = response.content if isinstance(response.content, str) else str(response.content)
 
     tokens_used = token_budget.current_total() or state.get("tokens_used", 0)

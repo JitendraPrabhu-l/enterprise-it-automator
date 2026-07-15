@@ -184,6 +184,12 @@ async def evaluate(llm_factory: Callable[[GoldenTicket], Any]) -> EvalReport:
     """Runs every golden ticket through the real graph. llm_factory receives
     the ticket and returns the LLM to use (a ScriptedLLM of its recorded
     replies for CI; the real get_llm() result, ignoring the ticket, live).
+
+    Patches graph_module.FallbackLLM (not get_llm) — every agent node
+    constructs a FallbackLLM() rather than calling get_llm() directly (see
+    app/agent/llm.py's module docstring), so that's the seam to intercept
+    to get a fixed llm_factory result injected in place of real provider
+    fallback logic.
     """
     results: list[TicketResult] = []
     for index, ticket in enumerate(GOLDEN_TICKETS):
@@ -192,7 +198,7 @@ async def evaluate(llm_factory: Callable[[GoldenTicket], Any]) -> EvalReport:
             patch.object(graph_module, "mcp_session", _fake_mcp_session),
             patch.object(graph_module, "call_tool", _fake_call_tool),
             patch.object(graph_module, "discover_tool_reference", _fake_discover_tool_reference),
-            patch.object(graph_module, "get_llm", lambda: llm),
+            patch.object(graph_module, "FallbackLLM", lambda: llm),
         ):
             graph = compile_graph(checkpointer=InMemorySaver())
             config = {"configurable": {"thread_id": f"eval-{index}-{ticket['name']}"}}

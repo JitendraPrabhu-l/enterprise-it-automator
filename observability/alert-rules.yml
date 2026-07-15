@@ -65,3 +65,11 @@ groups:
         annotations:
           summary: "API /metrics unscrapable for 2m — app down or wedged"
           runbook: docs/RUNBOOKS.md#apidown
+
+      - alert: LlmFallbackActive
+        expr: increase(llm_fallback_total[10m]) > 0
+        labels:
+          severity: warn
+        annotations:
+          summary: "LLM calls served by {{ $labels.served_by }} instead of configured primary {{ $labels.primary }} — primary provider degraded/down"
+          runbook: docs/RUNBOOKS.md#llmfallbackactive

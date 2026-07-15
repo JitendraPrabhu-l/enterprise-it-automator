@@ -118,3 +118,18 @@ current prompts — raise it deliberately.
 The app is down or wedged. `docker compose ps` / `kubectl get pods`;
 container restarting → check its exit reason; running but unresponsive →
 grab `/health` and thread dumps (py-spy) before restarting.
+
+### LlmFallbackActive
+> LLM calls served by a non-primary provider.
+
+Tickets are still completing (that's the whole point of the fallback —
+see app/agent/llm.py's ainvoke_with_fallback), but the configured
+LLM_PROVIDER is degraded/down. Check the primary provider's own status
+page (Groq/Anthropic/watsonx/OpenRouter) and its API key validity first —
+a bad/expired key looks identical to an outage from this alert's
+perspective. This is a warn, not a page: no ticket is failing right now,
+but sustained fallback traffic means you're running on a different
+model's quality/latency/cost profile than you intended, and every model
+served by the fallback needs credentials configured (blank ones are
+silently skipped, not attempted) — confirm the fallback provider you're
+now depending on actually has a valid key set, not just the primary.

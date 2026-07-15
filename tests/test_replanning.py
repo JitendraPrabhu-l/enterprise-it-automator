@@ -98,7 +98,7 @@ async def test_replan_triggers_after_stale_plan_failure_and_completes(monkeypatc
             json.dumps([{"tool": "grant_access", "args": {"username": "tuser", "resource": "vpn"}, "reasoning": "replanned"}]),
         ]
     )
-    monkeypatch.setattr(graph_module, "get_llm", lambda: scripted_llm)
+    monkeypatch.setattr(graph_module, "FallbackLLM", lambda: scripted_llm)
 
     initial_plan = [
         {"tool": "create_user", "args": {"username": "tuser", "full_name": "T User", "email": "t@example.com"}, "reasoning": "onboard"}
@@ -171,7 +171,7 @@ async def test_replan_budget_prevents_infinite_loop(monkeypatch):
         [{"tool": "create_user", "args": {"username": "tuser", "full_name": "T", "email": "t@x.com"}, "reasoning": "retry"}]
     )
     scripted_llm = _ScriptedLLM([always_same_plan] * 10)
-    monkeypatch.setattr(graph_module, "get_llm", lambda: scripted_llm)
+    monkeypatch.setattr(graph_module, "FallbackLLM", lambda: scripted_llm)
 
     initial_plan = [
         {"tool": "create_user", "args": {"username": "tuser", "full_name": "T", "email": "t@x.com"}, "reasoning": "onboard"}
