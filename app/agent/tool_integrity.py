@@ -39,35 +39,35 @@ class ToolIntegrityError(RuntimeError):
     Settings.tool_integrity_strict is enabled."""
 
 
-def _canonicalize_property(prop: dict[str, Any]) -> dict[str, Any]:
-    """Extracts just the TYPE information from one JSON-schema property,
-    dropping pydantic-generated ornamentation (title, default, and exact
-    anyOf branch order/shape) that legitimately reformats across
-    pydantic-core/Python versions without the tool's actual argument
-    contract changing at all — e.g. a `str | None` parameter's `anyOf`
-    branch order, or whether a `title` like "Full Name" is auto-derived
-    from the field name, are pydantic-core implementation details, not
-    something a tool-poisoning attacker controls or a reviewer would ever
-    diff. Hashing that noise verbatim (an earlier version of this function
-    did) produces false-positive drift between environments with
-    different-but-compatible pydantic versions — confirmed live: a
-    contributor's local baseline regeneration disagreed with CI's despite
-    both running the exact same tool-registration code, traced to exactly
-    this. Only `name`, `description`, property NAMES, per-property TYPE,
-    and the REQUIRED set are what this check should actually be
-    sensitive to.
-    """
-    if "anyOf" in prop:
-        return {"anyOf": sorted({branch.get("type", "?") for branch in prop["anyOf"]})}
-    return {"type": prop.get("type", "?")}
-
-
 def _canonical_schema(input_schema: dict[str, Any]) -> dict[str, Any]:
+    """Extracts only the STRUCTURAL argument contract from a JSON schema —
+    property NAMES and which of them are REQUIRED — deliberately dropping
+    every per-property type/format detail (title, default, `type` vs
+    `anyOf` vs `type: [...]` nullable representation, and so on).
+
+    An earlier version of this function hashed per-property `type`
+    information too, canonicalizing `anyOf` branch order. That was STILL
+    not enough: pydantic-core versions differ not just in anyOf branch
+    order but in which JSON-Schema NULLABLE REPRESENTATION they emit at
+    all (`anyOf: [{type: X}, {type: null}]` vs the compact `type: [X,
+    "null"]` form), and confirmed live that this produced real
+    false-positive drift between a contributor's local environment and
+    CI's locked one even after the first fix — two representations of the
+    identical Optional[X] contract, hashing to different values because
+    the canonicalization only normalized one of the two forms.
+
+    Rather than keep chasing every JSON-Schema representation choice a
+    given pydantic-core version might make (an open-ended list this
+    project has no way to enumerate exhaustively), this hashes only what
+    an MCP client's PLANNER actually acts on and what a tool-poisoning
+    attacker could actually exploit: which arguments exist, and whether
+    each is required. A parameter's exact type is not something a
+    malicious server needs to change to steer the planner — the
+    `description` text (still hashed in full by hash_tool below) is where
+    that attack surface actually lives.
+    """
     properties = input_schema.get("properties") or {}
-    return {
-        "properties": {name: _canonicalize_property(prop) for name, prop in properties.items()},
-        "required": sorted(input_schema.get("required") or []),
-    }
+    return {"properties": sorted(properties), "required": sorted(input_schema.get("required") or [])}
 
 
 def hash_tool(name: str, description: str | None, input_schema: dict[str, Any] | None) -> str:

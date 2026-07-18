@@ -139,6 +139,27 @@ def test_hash_tool_ignores_pydantic_generated_ornamentation():
     )
 
 
+def test_hash_tool_ignores_which_nullable_representation_pydantic_chose():
+    """Regression test for the SECOND round of this bug: canonicalizing
+    anyOf branch order wasn't enough, because different pydantic-core
+    versions don't even agree on whether Optional[X] is expressed as
+    `anyOf: [{type: X}, {type: null}]` or the compact `type: [X, "null"]`
+    form — confirmed live against a real CI failure. hash_tool no longer
+    looks at per-property type shape at all (see _canonical_schema's
+    docstring), so both representations of the same ticket_id: int | None
+    parameter must hash identically.
+    """
+    anyof_form = {
+        "properties": {"ticket_id": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None}},
+        "required": [],
+    }
+    type_array_form = {
+        "properties": {"ticket_id": {"type": ["integer", "null"]}},
+        "required": [],
+    }
+    assert tool_integrity.hash_tool("t", "d", anyof_form) == tool_integrity.hash_tool("t", "d", type_array_form)
+
+
 def test_hash_tool_still_detects_a_real_argument_contract_change():
     base = {"properties": {"username": {"type": "string"}}, "required": ["username"]}
     added_required_arg = {
@@ -146,6 +167,12 @@ def test_hash_tool_still_detects_a_real_argument_contract_change():
         "required": ["username", "force"],
     }
     assert tool_integrity.hash_tool("t", "d", base) != tool_integrity.hash_tool("t", "d", added_required_arg)
+
+
+def test_hash_tool_still_detects_a_renamed_argument():
+    base = {"properties": {"username": {"type": "string"}}, "required": ["username"]}
+    renamed = {"properties": {"user_name": {"type": "string"}}, "required": ["user_name"]}
+    assert tool_integrity.hash_tool("t", "d", base) != tool_integrity.hash_tool("t", "d", renamed)
 
 
 # --- discover_tool_reference() integration: strict vs. log-only modes ------
