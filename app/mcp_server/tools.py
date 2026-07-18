@@ -8,7 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.db.models import AuditLog, EmployeeUser, Ticket, UserStatus
+from app.db.audit import append_audit_log
+from app.db.models import EmployeeUser, Ticket, UserStatus
 
 
 class ToolError(Exception):
@@ -143,15 +144,14 @@ async def _audit(
     this — they're followed by a normal return, so session_scope()'s own
     commit-on-clean-exit covers them already.
     """
-    session.add(
-        AuditLog(
-            ticket_id=ticket_id,
-            actor=actor,
-            tool_name=tool_name,
-            tool_args=tool_args,
-            result=result,
-            success=success,
-        )
+    await append_audit_log(
+        session,
+        ticket_id=ticket_id,
+        actor=actor,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        result=result,
+        success=success,
     )
     if commit_immediately:
         await session.commit()

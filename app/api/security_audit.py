@@ -15,7 +15,7 @@ alongside the request it's reporting on.
 
 import logging
 
-from app.db.models import AuditLog
+from app.db.audit import append_audit_log
 from app.db.session import session_scope
 
 logger = logging.getLogger(__name__)
@@ -30,15 +30,14 @@ async def record_security_event(*, actor: str, event: str, detail: str = "", suc
     """
     try:
         async with session_scope() as session:
-            session.add(
-                AuditLog(
-                    ticket_id=None,
-                    actor=actor,
-                    tool_name=event,
-                    tool_args={},
-                    result=detail,
-                    success=success,
-                )
+            await append_audit_log(
+                session,
+                ticket_id=None,
+                actor=actor,
+                tool_name=event,
+                tool_args={},
+                result=detail,
+                success=success,
             )
     except Exception:
         logger.exception("Failed to record security event actor=%s event=%s", actor, event)

@@ -177,6 +177,28 @@ class ApiClient(Base):
     daily_request_limit: Mapped[int] = mapped_column(default=100)
     daily_request_count: Mapped[int] = mapped_column(default=0)
     request_count_reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Same reset-on-read shape as daily_request_count/request_count_reset_at
+    # above, denominated in LLM tokens instead of requests — the org-level
+    # cost-governance half of Settings.max_tokens_per_ticket (that setting
+    # bounds one ticket's spend; this bounds one client's/the org's DAILY
+    # spend across every ticket). Updated from app/agent/token_budget.py's
+    # record_client_spend_and_check_budget, called at the same plan/replan
+    # checkpoints that already persist a ticket's running token total into
+    # AgentState — NOT threaded through the checkpointer itself, since
+    # Ticket.submitted_by_client_id (looked up fresh by ticket_id at that
+    # point) already answers "which client owns this spend" without a
+    # checkpoint schema change.
+    #
+    # Nullable, unlike daily_request_count/request_count_reset_at above,
+    # for the same reason data_last_purged_at/owned_by_client_id elsewhere
+    # in this model are nullable: those columns were present from this
+    # table's CREATE TABLE (the initial migration), so a NOT NULL default
+    # was safe there; these two are added via ALTER TABLE to a table that
+    # may already hold rows, and Postgres rejects a NOT NULL ADD COLUMN
+    # with no server-side default against a non-empty table. Application
+    # code (token_budget.py) treats NULL identically to 0/"never reset."
+    tokens_used_today: Mapped[int | None] = mapped_column(nullable=True)
+    token_count_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # A DIFFERENT concern from request_count_reset_at above, despite the
     # similar shape: that field tracks the daily REQUEST-COUNT budget
     # resetting; this one tracks when this client's own tickets/approvals/
@@ -315,7 +337,16 @@ class IdempotencyKey(Base):
 
 
 class AuditLog(Base):
-    """Immutable record of every tool invocation the MCP server executed."""
+    """Record of every tool invocation the MCP server executed — chained via
+    prev_hash/entry_hash (see app/db/audit.py::append_audit_log, the only
+    intended writer) into a tamper-EVIDENT log: editing or deleting a row
+    after the fact breaks the chain in a way verify_audit_chain() can
+    detect. Not tamper-PROOF — a DB-admin-level actor who rewrites the
+    entire chain from some point forward, recomputing every later hash
+    consistently, would go undetected by this alone. See app/db/audit.py's
+    module docstring for the full caveat and the recommended defense in
+    depth (streaming to an external SIEM).
+    """
 
     __tablename__ = "audit_log"
 
@@ -327,5 +358,32 @@ class AuditLog(Base):
     result: Mapped[str] = mapped_column(Text, default="")
     success: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # This row's position in the hash chain: prev_hash is the chain tip's
+    # hash AT THE TIME this row was appended; entry_hash covers prev_hash
+    # plus every other column above. Nullable because rows written before
+    # this chaining existed have neither (same "historical NULL" shape as
+    # Approval.reviewer_auth_method) — verify_audit_chain() treats a NULL
+    # entry_hash as "predates chaining, not verifiable, not tampering."
+    prev_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    entry_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     ticket: Mapped["Ticket | None"] = relationship(back_populates="audit_entries")
+
+
+class AuditChainHead(Base):
+    """Singleton (id is always 1) pointer to the audit hash chain's current
+    tip — app/db/audit.py's append_audit_log() locks this ROW (not the
+    whole audit_log table) to serialize concurrent chain appends across
+    replicas, and verify_audit_chain() compares it against the last row's
+    recomputed hash to catch a deleted trailing row (a deletion leaves no
+    mismatched row behind, but the head then points at a hash nothing
+    remaining reproduces).
+    """
+
+    __tablename__ = "audit_chain_head"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    latest_hash: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )

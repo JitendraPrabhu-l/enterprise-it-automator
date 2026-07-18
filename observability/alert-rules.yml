@@ -57,6 +57,26 @@ groups:
           summary: "Ticket runs aborted on MAX_TOKENS_PER_TICKET — a replanning loop or an undersized budget"
           runbook: docs/RUNBOOKS.md#tokenbudgetaborts
 
+      - alert: OrgTokenBudgetNearCap
+        # org_token_budget_limit is 0 when MAX_ORG_TOKENS_PER_DAY is
+        # unconfigured — guarded explicitly rather than relying on
+        # PromQL's divide-by-zero-returns-nothing behavior, so this rule
+        # reads correctly even before any budget check has ever run.
+        expr: org_token_budget_limit > 0 and (org_tokens_used_today / org_token_budget_limit) > 0.8
+        labels:
+          severity: warn
+        annotations:
+          summary: "Org-wide daily LLM token spend is past 80% of MAX_ORG_TOKENS_PER_DAY"
+          runbook: docs/RUNBOOKS.md#orgtokenbudgetnearcap
+
+      - alert: ClientTokenBudgetExceeded
+        expr: increase(client_token_budget_exceeded_total[1h]) > 0
+        labels:
+          severity: warn
+        annotations:
+          summary: "A ticket was rejected/aborted on a per-client or org-wide daily token budget"
+          runbook: docs/RUNBOOKS.md#clienttokenbudgetexceeded
+
       - alert: ApiDown
         expr: up{job="it-automator-api"} == 0
         for: 2m

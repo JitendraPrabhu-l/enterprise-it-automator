@@ -69,6 +69,28 @@ class Settings(BaseSettings):
     mcp_allowed_hosts: str = ""
     mcp_allowed_origins: str = ""
 
+    # Right-sized OAuth-2.1-flavored token exchange for the MCP HTTP
+    # transport (app/mcp_server/token_exchange.py): how long a scoped,
+    # domain-limited token minted from POST /token/exchange stays valid.
+    # mcp_server_token above is unaffected — it remains the ADMIN
+    # credential (full access, no expiry, unchanged from before this
+    # existed) and the ONLY credential that can mint a scoped token in the
+    # first place. Short by design: a leaked scoped token (logged, cached,
+    # proxied) is both domain-limited AND time-limited, unlike the static
+    # admin secret it's derived from.
+    mcp_scoped_token_ttl_seconds: int = 300
+
+    # Tool-description integrity check (app/agent/tool_integrity.py):
+    # whether a mismatch between the live-discovered tool set and the
+    # committed app/mcp_server/tool_baseline.json aborts the ticket (True)
+    # or is only logged + counted (False, the default). False is the safe
+    # default for a deployment that might legitimately ship a tool change
+    # and forget to regenerate the baseline in the same PR; True is the
+    # fail-closed choice for a deployment that wants an unreviewed tool
+    # change to halt agent activity rather than silently keep planning
+    # against it.
+    tool_integrity_strict: bool = False
+
     # create_user/grant_access were added after a security review found they
     # ran with zero human review — unlike disable_user/revoke_access, a
     # prompt-injected or hallucinated planner output could provision access
@@ -129,6 +151,18 @@ class Settings(BaseSettings):
     # sized to their prompts (a normal run here is low-thousands of tokens,
     # so e.g. 50000 is roomy without being unbounded).
     max_tokens_per_ticket: int = 0
+
+    # Org-level cost governance, beyond max_tokens_per_ticket's per-ticket
+    # ceiling: a per-ApiClient and an org-wide DAILY token budget. Both
+    # 0 (default) disable the respective check entirely — same opt-in
+    # philosophy as max_tokens_per_ticket, since the right ceiling is
+    # deployment- and pricing-specific. Enforced in two places: a
+    # pre-submission check on POST /tickets (app/api/main.py, before the
+    # graph even starts) and a runtime check at the same plan/replan gate
+    # max_tokens_per_ticket already uses (app/agent/token_budget.py), so a
+    # ticket that pushes a client/org over the cap mid-run still stops.
+    max_tokens_per_client_per_day: int = 0
+    max_org_tokens_per_day: int = 0
 
     # Stage 4.5 (scoped down): how long a sensitive approval may sit PENDING
     # before the background sweep (app/agent/sla_sweep.py) escalates it, and

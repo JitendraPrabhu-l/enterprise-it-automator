@@ -58,6 +58,7 @@ from app.agent import token_budget
 from app.agent.llm import FallbackLLM
 from app.agent.mcp_client import call_tool, is_transient_error, list_tools, mcp_session
 from app.agent.mcp_session_cache import get_cached_proxy
+from app.agent.tool_integrity import ToolIntegrityError, check_tool_integrity
 from app.agent.prompts.access_change import ACCESS_CHANGE_PLANNER_PROMPT
 from app.agent.prompts.common import PROMPT_INJECTION_GUARDRAIL
 from app.agent.prompts.offboarding import OFFBOARDING_PLANNER_PROMPT
@@ -458,9 +459,27 @@ async def discover_tool_reference() -> str:
     plan_node/replan_node invocation (not once per tool call), so the
     extra session-open cost is negligible compared to the correctness win
     of always reflecting the live server.
+
+    Also the tool-poisoning check point (app/agent/tool_integrity.py): this
+    is the one place every discovered tool definition passes through before
+    reaching the planner prompt, so it's the one place a hash-baseline
+    comparison actually matters.
     """
     async with mcp_session() as session:
         tools = await list_tools(session)
+
+    mismatches = check_tool_integrity(tools)
+    if mismatches:
+        metrics.MCP_TOOL_BASELINE_MISMATCH.inc(len(mismatches))
+        logger.warning("Tool baseline mismatch(es) detected: %s", "; ".join(mismatches))
+        if get_settings().tool_integrity_strict:
+            raise ToolIntegrityError(
+                "Refusing to plan: discovered MCP tools drifted from the committed "
+                f"baseline ({'; '.join(mismatches)}). Regenerate "
+                "app/mcp_server/tool_baseline.json (scripts/generate_tool_baseline.py) "
+                "if this is an intentional tool change, or investigate the server "
+                "if it isn't."
+            )
 
     lines = []
     for tool in tools:
@@ -541,7 +560,17 @@ async def plan_node(state: AgentState) -> dict:
 
     category = state.get("category", "ACCESS_CHANGE")
     prompt_template = CATEGORY_PROMPTS.get(category, CATEGORY_PROMPTS["ACCESS_CHANGE"])
-    tool_reference = await discover_tool_reference()
+    try:
+        tool_reference = await discover_tool_reference()
+    except ToolIntegrityError as exc:
+        logger.error("Tool integrity check failed in plan_node: %s", exc)
+        return {
+            "plan": [],
+            "plan_index": 0,
+            "error": str(exc),
+            "done": True,
+            "tokens_used": token_budget.current_total() or state.get("tokens_used", 0),
+        }
     system_prompt = prompt_template.replace("{tool_reference}", tool_reference)
 
     response = await llm.ainvoke(
@@ -564,6 +593,19 @@ async def plan_node(state: AgentState) -> dict:
             "plan": [],
             "plan_index": 0,
             "error": f"Planner returned malformed JSON: {exc}",
+            "done": True,
+            "messages": [AIMessage(content=raw)],
+            "tokens_used": tokens_used,
+        }
+
+    budget_reason = await token_budget.record_client_spend_and_check_budget(state["ticket_id"])
+    if budget_reason:
+        logger.warning("Client/org token budget exhausted in plan_node: %s", budget_reason)
+        metrics.CLIENT_TOKEN_BUDGET_EXCEEDED.inc()
+        return {
+            "plan": [],
+            "plan_index": 0,
+            "error": budget_reason,
             "done": True,
             "messages": [AIMessage(content=raw)],
             "tokens_used": tokens_used,
@@ -868,7 +910,15 @@ async def replan_node(state: AgentState) -> dict:
 
     category = state.get("category", "ACCESS_CHANGE")
     prompt_template = CATEGORY_PROMPTS.get(category, CATEGORY_PROMPTS["ACCESS_CHANGE"])
-    tool_reference = await discover_tool_reference()
+    try:
+        tool_reference = await discover_tool_reference()
+    except ToolIntegrityError as exc:
+        logger.error("Tool integrity check failed in replan_node: %s", exc)
+        return {
+            "error": str(exc),
+            "done": True,
+            "tokens_used": token_budget.current_total() or state.get("tokens_used", 0),
+        }
     system_prompt = prompt_template.replace("{tool_reference}", tool_reference)
 
     response = await llm.ainvoke(
@@ -887,6 +937,17 @@ async def replan_node(state: AgentState) -> dict:
         logger.warning("Replanner produced unparseable output: %s", exc)
         return {
             "error": f"Replanner returned malformed JSON: {exc}",
+            "done": True,
+            "messages": [AIMessage(content=raw)],
+            "tokens_used": tokens_used,
+        }
+
+    budget_reason = await token_budget.record_client_spend_and_check_budget(state["ticket_id"])
+    if budget_reason:
+        logger.warning("Client/org token budget exhausted in replan_node: %s", budget_reason)
+        metrics.CLIENT_TOKEN_BUDGET_EXCEEDED.inc()
+        return {
+            "error": budget_reason,
             "done": True,
             "messages": [AIMessage(content=raw)],
             "tokens_used": tokens_used,

@@ -1,0 +1,80 @@
+{{- if .Values.backup.enabled }}
+# Scheduled Postgres backup, deliberately using a SEPARATE Secret
+# (Values.backup.existingSecret) from the app's own `existingSecret` — see
+# values.yaml's backup block and scripts/backup_db.sh's docstring for why:
+# a backup credential that's the same one the app/agent holds isn't a real
+# recovery plane. Mirrors scripts/backup_db.sh's logic (used for local/CI
+# runs) inline here rather than copying that script into the image, since
+# the app's runtime image (see Dockerfile) deliberately ships no Postgres
+# client tools — this CronJob runs the official postgres image instead,
+# which already has pg_dump.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "eit.fullname" . }}-backup
+  labels:
+    {{- include "eit.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "eit.selectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: backup
+              image: {{ .Values.backup.image | quote }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              envFrom:
+                - secretRef:
+                    name: {{ .Values.backup.existingSecret }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  : "${BACKUP_DATABASE_URL:?BACKUP_DATABASE_URL is missing from the backup Secret}"
+                  ts=$(date -u +%Y%m%dT%H%M%SZ)
+                  out="/backups/it_automator_${ts}.dump"
+                  pg_dump -Fc "$BACKUP_DATABASE_URL" > "$out"
+                  echo "wrote $out"
+                  {{- if .Values.backup.uploadCommand }}
+                  {{ .Values.backup.uploadCommand }} "$out"
+                  {{- end }}
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              {{- if .Values.backup.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "eit.fullname" . }}-backups
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+{{- end }}
+{{- if and .Values.backup.enabled .Values.backup.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "eit.fullname" . }}-backups
+  labels:
+    {{- include "eit.labels" . | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.backup.persistence.size }}
+  {{- if .Values.backup.persistence.storageClassName }}
+  storageClassName: {{ .Values.backup.persistence.storageClassName }}
+  {{- end }}
+{{- end }}

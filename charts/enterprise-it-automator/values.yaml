@@ -50,6 +50,8 @@ env:
   LLM_PROVIDER: groq
   SENSITIVE_ACTIONS: disable_user,enable_user,revoke_access,create_user,grant_access
   MAX_TOKENS_PER_TICKET: "0"
+  MAX_TOKENS_PER_CLIENT_PER_DAY: "0"
+  MAX_ORG_TOKENS_PER_DAY: "0"
   OIDC_ISSUER: ""
   OIDC_AUDIENCE: ""
   OIDC_USERNAME_CLAIM: preferred_username
@@ -66,6 +68,46 @@ mcpSidecar:
 # schema out-of-band.
 migrations:
   enabled: true
+
+# Scheduled Postgres backup (docs/RUNBOOKS.md's "Backup / restore" section),
+# deliberately using a SEPARATE Secret from `existingSecret` above — the
+# whole point is that the backup role's credential (BACKUP_DATABASE_URL,
+# a read-only Postgres role: SELECT only, no INSERT/UPDATE/DELETE/DROP)
+# must be provisionable/rotatable independently of the app's own read/write
+# DATABASE_URL, so a compromised or malicious agent action (which only ever
+# holds the APP's credential) can't also reach or destroy the backups.
+# Disabled by default — opt in once BOTH the read-only role and this
+# separate Secret actually exist; see scripts/backup_db.sh's docstring for
+# how to provision the role and scripts/validate_backup_restore.sh for how
+# to prove a produced dump is genuinely restorable.
+backup:
+  enabled: false
+  schedule: "0 3 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  # A DIFFERENT Kubernetes Secret name than `existingSecret` above — must
+  # contain only BACKUP_DATABASE_URL (and optionally BACKUP_UPLOAD_CMD),
+  # e.g.:
+  #   kubectl create secret generic it-automator-backup \
+  #     --from-literal=BACKUP_DATABASE_URL='postgresql://backup_ro:pw@pg:5432/it_automator'
+  existingSecret: it-automator-backup
+  # A shell command run against each dump file after it's written (e.g.
+  # `aws s3 cp` / `rclone copy`) — the CronJob's image (postgres:16-alpine)
+  # ships neither by default; use persistence.enabled (below) for the
+  # simplest self-contained option, or build a custom backup image with
+  # your upload CLI of choice and override `backup.image` if you need
+  # object-storage upload without a sidecar.
+  uploadCommand: ""
+  image: "postgres:16-alpine"
+  # PVC-backed destination for dump files — the default, simplest path
+  # ("backups land on a volume, ops pulls them from there or a snapshot
+  # policy covers the PVC itself"). Disable only if uploadCommand (or a
+  # values override adding an upload sidecar) is the real destination —
+  # an emptyDir means every dump is lost the moment its Job pod is GC'd.
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClassName: ""
 
 podSecurityContext:
   runAsNonRoot: true

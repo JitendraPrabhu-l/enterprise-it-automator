@@ -21,7 +21,8 @@ from sqlalchemy import func, select
 from app import metrics
 from app.api.idempotency import purge_expired
 from app.config import get_settings
-from app.db.models import AuditLog, Approval, ApprovalStatus, Ticket, TicketStatus
+from app.db.audit import append_audit_log
+from app.db.models import Approval, ApprovalStatus, Ticket, TicketStatus
 from app.db.session import session_scope, try_advisory_lock
 
 logger = logging.getLogger(__name__)
@@ -64,18 +65,17 @@ async def sweep_overdue_approvals() -> list[int]:
         for approval in overdue:
             approval.status = ApprovalStatus.ESCALATED
             approval.escalated_at = now
-            session.add(
-                AuditLog(
-                    ticket_id=approval.ticket_id,
-                    actor="sla_sweep",
-                    tool_name=approval.tool_name,
-                    tool_args=approval.tool_args,
-                    result=(
-                        f"Approval {approval.id} escalated — pending past its "
-                        f"SLA deadline ({approval.sla_deadline.isoformat()}) with no reviewer decision."
-                    ),
-                    success=False,
-                )
+            await append_audit_log(
+                session,
+                ticket_id=approval.ticket_id,
+                actor="sla_sweep",
+                tool_name=approval.tool_name,
+                tool_args=approval.tool_args,
+                result=(
+                    f"Approval {approval.id} escalated — pending past its "
+                    f"SLA deadline ({approval.sla_deadline.isoformat()}) with no reviewer decision."
+                ),
+                success=False,
             )
             escalated_ids.append(approval.id)
 
@@ -138,15 +138,14 @@ async def sweep_stuck_tickets() -> list[int]:
             )
             ticket.status = TicketStatus.FAILED
             ticket.result_summary = summary
-            session.add(
-                AuditLog(
-                    ticket_id=ticket.id,
-                    actor="sla_sweep",
-                    tool_name="stuck_ticket_detection",
-                    tool_args={},
-                    result=summary,
-                    success=False,
-                )
+            await append_audit_log(
+                session,
+                ticket_id=ticket.id,
+                actor="sla_sweep",
+                tool_name="stuck_ticket_detection",
+                tool_args={},
+                result=summary,
+                success=False,
             )
             stuck_ids.append(ticket.id)
 

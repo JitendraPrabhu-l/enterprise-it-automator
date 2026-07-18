@@ -180,44 +180,66 @@ def _score(ticket: GoldenTicket, category: str, plan: list[dict], gated: bool) -
     )
 
 
-async def evaluate(llm_factory: Callable[[GoldenTicket], Any]) -> EvalReport:
-    """Runs every golden ticket through the real graph. llm_factory receives
-    the ticket and returns the LLM to use (a ScriptedLLM of its recorded
-    replies for CI; the real get_llm() result, ignoring the ticket, live).
+async def run_ticket_through_graph(
+    subject: str, body: str, llm: Any, thread_id: str, ticket_id: int
+) -> tuple[str, list[dict], bool]:
+    """The real-graph invocation shared by every eval mode (golden-ticket
+    CI/live replay, and the adversarial live fuzz corpus in
+    evals/run_adversarial.py) — a fake MCP boundary + the given LLM,
+    returning (category, plan, gated). Factored out of evaluate() below so
+    a second caller with a DIFFERENT scoring contract (adversarial cases
+    care about forbidden_tools/gating, not exact category/plan-sequence
+    match — see evals/run_adversarial.py's module docstring for why that's
+    a deliberately different, looser contract) doesn't have to duplicate
+    the graph-invocation plumbing.
 
     Patches graph_module.FallbackLLM (not get_llm) — every agent node
     constructs a FallbackLLM() rather than calling get_llm() directly (see
     app/agent/llm.py's module docstring), so that's the seam to intercept
-    to get a fixed llm_factory result injected in place of real provider
-    fallback logic.
+    to get a fixed `llm` injected in place of real provider fallback logic.
+    """
+    with (
+        patch.object(graph_module, "mcp_session", _fake_mcp_session),
+        patch.object(graph_module, "call_tool", _fake_call_tool),
+        patch.object(graph_module, "discover_tool_reference", _fake_discover_tool_reference),
+        patch.object(graph_module, "FallbackLLM", lambda: llm),
+    ):
+        graph = compile_graph(checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": thread_id}}
+        token_budget.start_accounting(0)
+        state = await graph.ainvoke(
+            {
+                "messages": [],
+                "ticket_id": ticket_id,
+                "ticket_text": f"Subject: {subject}\n\n{body}",
+                "category": "", "plan": [], "plan_index": 0,
+                "pending_approval_id": None, "results": [], "done": False,
+                "error": None, "replan_count": 0, "tokens_used": 0,
+            },
+            config=config,
+        )
+        snapshot = await graph.aget_state(config)
+        gated = bool(getattr(snapshot, "interrupts", None) or ())
+
+    return state.get("category", ""), state.get("plan", []), gated
+
+
+async def evaluate(
+    llm_factory: Callable[[GoldenTicket], Any], tickets: list[GoldenTicket] | None = None
+) -> EvalReport:
+    """Runs every golden ticket (or `tickets`, if given a different set)
+    through the real graph via run_ticket_through_graph, then scores each
+    against the exact-match golden-ticket contract (see _score above).
+    llm_factory receives the ticket and returns the LLM to use (a
+    ScriptedLLM of its recorded replies for CI; the real get_llm() result,
+    ignoring the ticket, live).
     """
     results: list[TicketResult] = []
-    for index, ticket in enumerate(GOLDEN_TICKETS):
+    for index, ticket in enumerate(tickets if tickets is not None else GOLDEN_TICKETS):
         llm = llm_factory(ticket)
-        with (
-            patch.object(graph_module, "mcp_session", _fake_mcp_session),
-            patch.object(graph_module, "call_tool", _fake_call_tool),
-            patch.object(graph_module, "discover_tool_reference", _fake_discover_tool_reference),
-            patch.object(graph_module, "FallbackLLM", lambda: llm),
-        ):
-            graph = compile_graph(checkpointer=InMemorySaver())
-            config = {"configurable": {"thread_id": f"eval-{index}-{ticket['name']}"}}
-            token_budget.start_accounting(0)
-            state = await graph.ainvoke(
-                {
-                    "messages": [],
-                    "ticket_id": 900_000 + index,
-                    "ticket_text": f"Subject: {ticket['subject']}\n\n{ticket['body']}",
-                    "category": "", "plan": [], "plan_index": 0,
-                    "pending_approval_id": None, "results": [], "done": False,
-                    "error": None, "replan_count": 0, "tokens_used": 0,
-                },
-                config=config,
-            )
-            snapshot = await graph.aget_state(config)
-            gated = bool(getattr(snapshot, "interrupts", None) or ())
-
-        results.append(
-            _score(ticket, state.get("category", ""), state.get("plan", []), gated)
+        category, plan, gated = await run_ticket_through_graph(
+            ticket["subject"], ticket["body"], llm,
+            thread_id=f"eval-{index}-{ticket['name']}", ticket_id=900_000 + index,
         )
+        results.append(_score(ticket, category, plan, gated))
     return EvalReport(results=results)

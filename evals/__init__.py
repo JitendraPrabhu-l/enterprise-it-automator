@@ -15,4 +15,14 @@ Two consumers, one scorer:
   regressions that only show up in real generations). Run it before
   changing LLM_PROVIDER/model pins, and periodically against production
   config.
+
+A third, separate corpus — evals/adversarial.py + evals/run_adversarial.py
+(manual / weekly-scheduled, real configured LLM only, never recorded
+replay) — fuzzes prompt-injection resistance specifically: ~10 disguised
+injection attempts, scored on whether a forbidden tool ever appears in the
+plan, not on exact category/tool-sequence match (a different, looser
+contract than the golden tickets' — see evals/run_adversarial.py's module
+docstring for why). Complements the golden set's single pinned
+`prompt-injection-resisted` case, which only proves resistance to one
+already-known phrasing replayed against a canned response.
 """

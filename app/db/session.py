@@ -90,6 +90,10 @@ async def init_db() -> None:
     await _ensure_column(engine, table="reviewers", column="email", ddl_type="VARCHAR(128)")
     await _ensure_column(engine, table="approvals", column="reviewer_auth_method", ddl_type="VARCHAR(16)")
     await _ensure_column(engine, table="approvals", column="reviewer_oidc_subject", ddl_type="VARCHAR(128)")
+    await _ensure_column(engine, table="audit_log", column="prev_hash", ddl_type="VARCHAR(64)")
+    await _ensure_column(engine, table="audit_log", column="entry_hash", ddl_type="VARCHAR(64)")
+    await _ensure_column(engine, table="api_clients", column="tokens_used_today", ddl_type="INTEGER")
+    await _ensure_column(engine, table="api_clients", column="token_count_reset_at", ddl_type="TIMESTAMP")
 
 
 async def _ensure_column(engine, *, table: str, column: str, ddl_type: str) -> None:

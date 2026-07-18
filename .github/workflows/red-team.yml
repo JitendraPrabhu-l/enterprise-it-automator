@@ -1,0 +1,34 @@
+name: Adversarial red-team eval
+
+# Runs evals/run_adversarial.py (the live-model prompt-injection fuzz
+# corpus, evals/adversarial.py) against the real configured model — NOT on
+# every PR like ci.yml's recorded-replay golden tickets, for the same
+# reason evals/run_live.py isn't either: it costs real API spend, is
+# non-deterministic, and needs a live provider key. workflow_dispatch for
+# an on-demand run (e.g. before a model/prompt change ships — see
+# docs/RUNBOOKS.md's "Before changing models/prompts/providers" section),
+# plus a weekly schedule so prompt/model drift on the defenses this
+# actually tests gets caught without a human having to remember to run it.
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 6 * * 1" # Mondays, 06:00 UTC
+
+jobs:
+  adversarial-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.lock.txt
+
+      - name: Run adversarial prompt-injection eval against the live model
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python -m evals.run_adversarial

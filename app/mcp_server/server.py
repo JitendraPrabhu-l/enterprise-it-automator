@@ -33,6 +33,7 @@ and the transport app/agent/mcp_client.py connects with.
 import functools
 import hmac
 import inspect
+import json
 import logging
 from typing import Literal
 
@@ -40,8 +41,9 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.config import get_settings
 from app.db.session import init_db
@@ -49,7 +51,9 @@ from app.mcp_server.access_server import access_mcp
 from app.mcp_server.identity_server import identity_mcp
 from app.mcp_server.prompts import register_prompts
 from app.mcp_server.rate_limit import check_rate_limit
+from app.mcp_server.registry import get_registry, resolve_domain_for_tool
 from app.mcp_server.resources import register_resources
+from app.mcp_server.token_exchange import InvalidScopedTokenError, mint_scoped_token, verify_scoped_token
 from app.mcp_server.tools import is_sensitive
 from app.mcp_server.ticketing_server import ticketing_mcp
 
@@ -222,23 +226,82 @@ async def _bootstrap() -> None:
     await _compose_gateway()
 
 
-class _BearerTokenMiddleware:
-    """Minimal ASGI middleware requiring `Authorization: Bearer <token>` on
-    every request before it reaches the MCP handler.
+_TOKEN_EXCHANGE_PATH = "/token/exchange"
 
-    Not full OAuth 2.1 (Protected Resource Metadata, audience-scoped tokens
-    per ROADMAP.md's Stage 4.3) — that's explicitly descoped as too large
-    for this project. This closes the more basic gap: FastMCP's
-    streamable-HTTP transport applies zero authentication of its own, so
-    any network client that can reach MCP_SERVER_HOST:MCP_SERVER_PORT
-    could otherwise call tools directly (including replaying a
-    guessed/observed approval_id against a sensitive tool — see
-    approval_gate.py's executed_at guard for the other half of that fix),
-    completely bypassing the FastAPI layer's
-    require_api_key/require_reviewer_token. DNS-rebinding (Origin/Host
-    header) protection is handled separately by the mcp SDK's own
-    TransportSecurityMiddleware, enabled via the `transport_security`
-    passed to FastMCP() above — not duplicated here.
+
+async def _buffer_body(receive: Receive) -> tuple[bytes, Receive]:
+    """Reads the full ASGI request body and returns (body, a replaying
+    receive callable) — standard pattern for ASGI middleware that needs to
+    inspect a body and then still let the wrapped app read it. Only used
+    on the path that actually forwards to self._app afterward (the
+    /token/exchange short-circuit below never needs to replay, since it
+    always terminates the request itself).
+    """
+    body = b""
+    messages: list[Message] = []
+    more_body = True
+    while more_body:
+        message = await receive()
+        messages.append(message)
+        body += message.get("body", b"")
+        more_body = message.get("more_body", False)
+
+    async def _replay() -> Message:
+        if messages:
+            return messages.pop(0)
+        return await receive()
+
+    return body, _replay
+
+
+def _tool_names_from_jsonrpc_body(body: bytes) -> list[str]:
+    """Extracts every `params.name` from `tools/call` request(s) in a
+    JSON-RPC body — a single request object or a batched array of them
+    (MCP/JSON-RPC both permit batching). Returns [] for anything that
+    isn't valid JSON, isn't a tools/call, or has no resolvable name — those
+    all fall through to "not a tool-call needing a scope check" rather
+    than being treated as an error here; FastMCP's own JSON-RPC handling
+    is what actually validates/rejects a malformed request.
+    """
+    try:
+        parsed = json.loads(body) if body else None
+    except (ValueError, TypeError):
+        return []
+    messages = parsed if isinstance(parsed, list) else [parsed]
+    names = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("method") != "tools/call":
+            continue
+        name = (message.get("params") or {}).get("name")
+        if isinstance(name, str):
+            names.append(name)
+    return names
+
+
+class _BearerTokenMiddleware:
+    """ASGI middleware enforcing bearer-token auth on every request before
+    it reaches the MCP handler, plus (new) scoped-token domain enforcement
+    and the /token/exchange endpoint — see app/mcp_server/token_exchange.py
+    for the full design rationale.
+
+    Two credential shapes are accepted on the MCP protocol path itself:
+    - The raw MCP_SERVER_TOKEN (admin): full access, unchanged from before
+      scoped tokens existed — every existing HTTP-transport deployment
+      keeps working with zero config changes.
+    - A scoped JWT minted via POST /token/exchange (admin-only to mint):
+      valid for exactly the domain(s) it was scoped to; a tools/call for a
+      tool outside those domains gets 403 insufficient_scope instead of
+      reaching the tool at all.
+
+    Not full OAuth 2.1 (RFC 9728 Protected Resource Metadata, a user-facing
+    PKCE authorization-code flow) — that remains explicitly descoped as
+    disproportionate to this project (see token_exchange.py's module
+    docstring). DNS-rebinding (Origin/Host header) protection is handled
+    separately by the mcp SDK's own TransportSecurityMiddleware, enabled
+    via the `transport_security` passed to FastMCP() above — not
+    duplicated here.
     """
 
     def __init__(self, app: ASGIApp, token: str) -> None:
@@ -250,17 +313,103 @@ class _BearerTokenMiddleware:
             await self._app(scope, receive, send)
             return
 
-        headers = dict(scope.get("headers") or [])
-        auth_header = headers.get(b"authorization", b"").decode("latin-1")
-        expected = f"Bearer {self._token}"
-        if not auth_header or not hmac.compare_digest(auth_header, expected):
-            response = JSONResponse(
-                {"error": "Missing or invalid Authorization bearer token"}, status_code=401
-            )
-            await response(scope, receive, send)
+        if scope["path"] == _TOKEN_EXCHANGE_PATH:
+            await self._handle_token_exchange(scope, receive, send)
             return
 
-        await self._app(scope, receive, send)
+        headers = dict(scope.get("headers") or [])
+        auth_header = headers.get(b"authorization", b"").decode("latin-1")
+        presented = auth_header.removeprefix("Bearer ") if auth_header.startswith("Bearer ") else None
+
+        if presented is not None and hmac.compare_digest(presented, self._token):
+            # Admin credential: full access, exactly today's pre-scoped-token behavior.
+            await self._app(scope, receive, send)
+            return
+
+        if presented is None:
+            await JSONResponse(
+                {"error": "Missing or invalid Authorization bearer token"}, status_code=401
+            )(scope, receive, send)
+            return
+
+        try:
+            scopes = verify_scoped_token(presented)
+        except InvalidScopedTokenError as exc:
+            await JSONResponse(
+                {"error": f"Invalid or expired scoped token: {exc}"}, status_code=401
+            )(scope, receive, send)
+            return
+
+        if scope["method"] != "POST":
+            # GET (streamable-HTTP's server-initiated SSE direction) carries
+            # no tools/call body to check — any valid token may open it.
+            await self._app(scope, receive, send)
+            return
+
+        body, replay_receive = await _buffer_body(receive)
+        tool_names = _tool_names_from_jsonrpc_body(body)
+        for tool_name in tool_names:
+            domain = resolve_domain_for_tool(tool_name)
+            if domain not in scopes:
+                await JSONResponse(
+                    {
+                        "error": "insufficient_scope",
+                        "detail": f"Token scoped to {sorted(scopes)} does not cover "
+                        f"domain {domain!r} required by tool {tool_name!r}.",
+                    },
+                    status_code=403,
+                    headers={"WWW-Authenticate": 'Bearer error="insufficient_scope"'},
+                )(scope, receive, send)
+                return
+
+        await self._app(scope, replay_receive, send)
+
+    async def _handle_token_exchange(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """POST /token/exchange — admin-only. Never reaches self._app; this
+        endpoint is fully synthetic, existing only inside this middleware
+        (see server.py module docstring's _TOKEN_EXCHANGE_PATH usage for
+        why: bolting a real route onto FastMCP's own Starlette app is more
+        fragile across mcp SDK versions than intercepting one fixed path
+        here, where every other request is already being inspected anyway).
+        """
+        if scope["method"] != "POST":
+            await JSONResponse({"error": "POST required"}, status_code=405)(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        auth_header = headers.get(b"authorization", b"").decode("latin-1")
+        presented = auth_header.removeprefix("Bearer ") if auth_header.startswith("Bearer ") else None
+        if presented is None or not hmac.compare_digest(presented, self._token):
+            await JSONResponse(
+                {"error": "POST /token/exchange requires the admin MCP_SERVER_TOKEN"}, status_code=401
+            )(scope, receive, send)
+            return
+
+        request = Request(scope, receive)
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            await JSONResponse({"error": "Request body must be JSON"}, status_code=400)(scope, receive, send)
+            return
+
+        requested = payload.get("scopes") if isinstance(payload, dict) else None
+        if not isinstance(requested, list) or not requested or not all(isinstance(s, str) for s in requested):
+            await JSONResponse(
+                {"error": "Body must be {\"scopes\": [<domain>, ...]}"}, status_code=400
+            )(scope, receive, send)
+            return
+
+        valid_domains = set(get_registry())
+        unknown = sorted(set(requested) - valid_domains)
+        if unknown:
+            await JSONResponse(
+                {"error": f"Unknown domain(s): {unknown}. Valid domains: {sorted(valid_domains)}"},
+                status_code=400,
+            )(scope, receive, send)
+            return
+
+        token_response = mint_scoped_token(requested)
+        await JSONResponse(token_response, status_code=200)(scope, receive, send)
 
 
 def _authenticated_streamable_http_app() -> Starlette:

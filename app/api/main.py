@@ -51,6 +51,7 @@ from app.db.models import (
     TicketStatus,
     UserStatus,
 )
+from app.db.audit import verify_audit_chain
 from app.db.session import init_db, session_scope
 from app.logging_config import configure_logging, set_request_id
 from app.observability import configure_observability
@@ -394,6 +395,27 @@ async def _check_and_increment_daily_request_count(client: ApiClient | None) -> 
         row.daily_request_count += 1
 
 
+async def _check_client_org_token_budget(client: ApiClient | None) -> None:
+    """Pre-submission half of the org-level cost-governance check
+    (app/agent/token_budget.py): rejects BEFORE a ticket/graph run even
+    starts if this client (or the org) already used up its daily token
+    budget from PRIOR tickets. Doesn't record anything itself — this
+    ticket hasn't run yet, so it has no spend to attribute — the runtime
+    half (record_client_spend_and_check_budget, called from plan/replan)
+    is what actually books new spend and can also stop an already-running
+    ticket that pushes the budget over mid-run.
+    """
+    if client is None:
+        return
+    from app.agent.token_budget import check_client_org_budget
+
+    async with session_scope() as session:
+        reason = await check_client_org_budget(session, client.id)
+    if reason:
+        metrics.CLIENT_TOKEN_BUDGET_EXCEEDED.inc()
+        raise HTTPException(429, reason)
+
+
 @app.post("/tickets", response_model=RunResult)
 @limiter.limit("20/minute")
 async def submit_ticket(
@@ -410,6 +432,7 @@ async def submit_ticket(
     duplicate ticket and re-running the agent graph.
     """
     await _check_and_increment_daily_request_count(client)
+    await _check_client_org_token_budget(client)
     payload_dict = payload.model_dump()
 
     if idempotency_key:
@@ -457,6 +480,7 @@ async def submit_ticket_stream(
     that needs idempotent ticket submission should use POST /tickets.
     """
     await _check_and_increment_daily_request_count(client)
+    await _check_client_org_token_budget(client)
     async with session_scope() as session:
         ticket = Ticket(
             requester=payload.requester,
@@ -967,6 +991,39 @@ async def export_audit_log(
             yield buf.getvalue()
 
     return StreamingResponse(_csv(), media_type="text/csv")
+
+
+@app.get("/audit/verify")
+@limiter.limit("10/minute")
+async def audit_verify(
+    request: Request,
+    client: ApiClient | None = Depends(require_api_client),
+) -> dict:
+    """Walks the full audit-log hash chain (app/db/audit.py) and reports
+    whether every row's stored hash still matches its recomputed contents,
+    and whether the chain head still matches the last row — the on-demand
+    integrity check docs/RUNBOOKS.md's "Audit log integrity" runbook entry
+    points at. ADMIN-only, same reasoning as GET /audit/export: this reads
+    a fact about the ENTIRE audit trail, not one caller's own tickets.
+
+    A tampered result is itself logged as a security event — same
+    "the check being run is itself worth auditing" pattern as
+    export_audit_log's own actor/format/time-range logging above.
+    """
+    if client is None or client.role != ApiClientRole.ADMIN:
+        raise HTTPException(403, "Only an admin API client may verify the audit log.")
+
+    async with session_scope() as session:
+        ok, detail = await verify_audit_chain(session)
+
+    if not ok:
+        await record_security_event(
+            actor=f"api_client:{client.name}",
+            event="audit_chain_verification_failed",
+            detail=detail,
+            success=False,
+        )
+    return {"ok": ok, "detail": detail}
 
 
 @app.post(

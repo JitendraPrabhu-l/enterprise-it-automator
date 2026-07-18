@@ -100,6 +100,31 @@ TICKET_TOKEN_BUDGET_EXCEEDED = Counter(
     "Ticket runs aborted because they exceeded MAX_TOKENS_PER_TICKET.",
 )
 
+CLIENT_TOKEN_BUDGET_EXCEEDED = Counter(
+    "client_token_budget_exceeded_total",
+    "Ticket runs aborted (at submission or mid-run) because a per-client "
+    "or org-wide daily token budget (MAX_TOKENS_PER_CLIENT_PER_DAY / "
+    "MAX_ORG_TOKENS_PER_DAY) was already met or exceeded.",
+)
+
+ORG_TOKENS_TODAY = Gauge(
+    "org_tokens_used_today",
+    "Sum of every ApiClient's tokens_used_today — the org-wide daily LLM "
+    "token spend MAX_ORG_TOKENS_PER_DAY is checked against. Refreshed "
+    "whenever the client/org budget check runs (submission-time or the "
+    "plan/replan runtime gate), not on a separate timer.",
+    multiprocess_mode="max",
+)
+
+ORG_TOKEN_BUDGET_LIMIT = Gauge(
+    "org_token_budget_limit",
+    "The currently-configured MAX_ORG_TOKENS_PER_DAY value, exported as its "
+    "own gauge so the OrgTokenBudgetNearCap alert rule can express a RATIO "
+    "(org_tokens_used_today / org_token_budget_limit) in PromQL, which has "
+    "no way to read application config directly. 0 when unconfigured.",
+    multiprocess_mode="max",
+)
+
 MCP_TOOL_CALLS = Counter(
     "mcp_tool_calls_total",
     "MCP tool calls, by tool name and outcome (success/failure).",
@@ -111,6 +136,14 @@ CIRCUIT_BREAKER_OPEN = Gauge(
     "1 when the named MCP domain's circuit breaker is open or half-open, else 0.",
     ["domain"],
     multiprocess_mode="max",
+)
+
+MCP_TOOL_BASELINE_MISMATCH = Counter(
+    "mcp_tool_baseline_mismatch_total",
+    "Live-discovered MCP tool definitions that drifted from the committed "
+    "tool_baseline.json (app/agent/tool_integrity.py) — a nonzero rate "
+    "means either an unreviewed server-side tool change or a real "
+    "tool-poisoning attempt; see docs/RUNBOOKS.md.",
 )
 
 LLM_FALLBACK_TOTAL = Counter(
