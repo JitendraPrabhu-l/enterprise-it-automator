@@ -1,12 +1,24 @@
 """Regenerates app/mcp_server/tool_baseline.json from the gateway's actual,
 currently-registered tool set.
 
-Run this deliberately, once, after intentionally adding/removing/changing a
-tool — review the resulting diff like any other code change, then commit it
-alongside the tool change itself. tests/test_tool_baseline.py fails CI if
-the live tool set and the committed baseline ever disagree without this
-having been re-run, the same drift-gate shape as tests/test_migrations.py
-for the Alembic chain.
+IMPORTANT — running this locally and committing the result is NOT the
+supported workflow for the file that actually gets committed. hash_tool()
+(app/agent/tool_integrity.py) hashes property names/required-set + full
+description text, and while that's deliberately immune to per-property
+JSON-Schema type-formatting differences across pydantic-core versions
+(see that module's docstring for two confirmed-live rounds of that exact
+bug), there is no guarantee some OTHER environment difference between a
+dev machine and CI's locked/pinned environment won't again produce a
+byte-different result for reasons that have nothing to do with an actual
+tool change. Use `.github/workflows/regenerate-tool-baseline.yml`
+(Actions tab → "Run workflow") instead after an intentional tool
+change — it runs this exact script inside CI's own environment and
+commits the result, which is the only way to GUARANTEE the committed file
+matches what tests/test_tool_baseline.py's drift gate will itself compute.
+
+Running this script locally is still useful as a quick, own-machine sanity
+check ("did my tool change do what I expect") — just don't commit its
+output directly.
 
 Usage:
     python -m scripts.generate_tool_baseline

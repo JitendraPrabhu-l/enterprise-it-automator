@@ -1,0 +1,68 @@
+name: Regenerate MCP tool baseline
+
+# Manually-triggered only — NOT automatic on every drift-gate failure. The
+# whole point of app/mcp_server/tool_baseline.json (app/agent/tool_integrity.py)
+# is requiring a HUMAN to notice and review a tool-definition change before
+# it's trusted; auto-committing whatever CI computes on every failure would
+# silently launder an actual unreviewed/malicious tool change past the check
+# it exists to catch, which is worse than the bug this workflow fixes.
+#
+# What this DOES fix: tests/test_tool_baseline.py's drift gate compares a
+# COMMITTED file against a LIVE computation — if that file was ever hand-
+# generated on a developer's own machine (scripts/generate_tool_baseline.py
+# run locally), it can byte-differ from what CI computes purely from
+# pydantic-core/library version differences having nothing to do with any
+# actual tool change (confirmed live, twice, this is a real failure mode).
+# Running the SAME generator inside THIS workflow instead means the
+# committed file is always produced by, and therefore always matches,
+# the exact environment the drift gate itself runs in.
+#
+# Usage: after an INTENTIONAL tool change (or if the drift gate fails and
+# you've confirmed via the diff that it's not a real tool-poisoning
+# signal), trigger this from the Actions tab ("Run workflow") instead of
+# running scripts/generate_tool_baseline.py locally and committing the
+# result yourself.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.lock.txt
+
+      - name: Regenerate app/mcp_server/tool_baseline.json in this environment
+        run: python -m scripts.generate_tool_baseline
+
+      - name: Show diff in the step summary (for review before/after commit)
+        run: |
+          echo '## tool_baseline.json diff' >> "$GITHUB_STEP_SUMMARY"
+          echo '```diff' >> "$GITHUB_STEP_SUMMARY"
+          git diff -- app/mcp_server/tool_baseline.json >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet -- app/mcp_server/tool_baseline.json; then
+            echo "Already up to date with this environment — nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app/mcp_server/tool_baseline.json
+          git commit -m "ci: regenerate tool_baseline.json in CI's own environment
+
+          Manually triggered via regenerate-tool-baseline.yml — see that
+          workflow's comments and app/agent/tool_integrity.py for why the
+          committed baseline must be produced by CI, not a dev machine."
+          git push origin HEAD:${{ github.ref_name }}

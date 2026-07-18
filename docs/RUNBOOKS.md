@@ -50,6 +50,24 @@ the injection case still refused (safety held; planning quality didn't).
 signals (gating, forbidden tools) from the quality signals (category, plan
 shape) before deciding whether a score change blocks a rollout.
 
+## After changing an MCP tool's name, description, or arguments
+
+`tests/test_tool_baseline.py` fails CI if the live-discovered tool set
+(`app/mcp_server/*_server.py`) disagrees with the committed
+`app/mcp_server/tool_baseline.json` (the tool-poisoning defense —
+app/agent/tool_integrity.py). **Do not** run
+`python -m scripts.generate_tool_baseline` locally and commit its output —
+that produced two real, confirmed false-positive CI failures (pydantic-core
+schema-formatting differences between a dev machine and CI's locked
+environment, nothing to do with an actual tool change). Instead, trigger
+`.github/workflows/regenerate-tool-baseline.yml` from the Actions tab ("Run
+workflow") — it regenerates the file inside CI's own environment and
+commits the result, which is the only way to guarantee the committed file
+matches what the drift gate itself will compute. Review the diff it posts
+to the run's step summary before/after — a mismatch limited to the tool(s)
+you actually meant to change is expected; anything else is worth
+investigating before merging.
+
 ## Backup / restore
 
 - **Postgres, manual**: `pg_dump -Fc it_automator > backup.dump`; restore
