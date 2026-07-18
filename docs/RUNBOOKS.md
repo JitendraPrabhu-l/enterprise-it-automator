@@ -30,6 +30,15 @@ Run the live eval against the real model: `python -m evals.run_live`
 (EVAL_MIN_SCORE=0.8 default). CI replays recorded outputs and cannot see
 model drift — this can. Budget ~2 minutes and a few thousand tokens.
 
+Also trigger the adversarial red-team eval
+(`.github/workflows/red-team.yml`, `workflow_dispatch`, or locally via
+`python -m evals.run_adversarial`) — a model/prompt change is exactly the
+kind of change that can silently weaken prompt-injection resistance
+without touching anything the golden-ticket suite's single pinned
+injection case would catch. Default `ADVERSARIAL_MIN_SCORE=1.0`: unlike
+the golden suite's live-model tolerance for one quality miss, a
+regression here means a guardrail stopped holding, not a flaky quality dip.
+
 Worked example (2026-07-13, the run that set the current model pin):
 `llama-3.1-8b-instant` scored **3/6** — hallucinated a cross-domain tool
 name (`access_get_user`), classified a status inquiry as ONBOARDING, padded
@@ -43,12 +52,71 @@ shape) before deciding whether a score change blocks a rollout.
 
 ## Backup / restore
 
-- **Postgres**: `pg_dump -Fc it_automator > backup.dump`; restore with
-  `pg_restore -d it_automator backup.dump`. The LangGraph checkpoints
+- **Postgres, manual**: `pg_dump -Fc it_automator > backup.dump`; restore
+  with `pg_restore -d it_automator backup.dump`. The LangGraph checkpoints
   tables are in the same database — one dump covers app state AND paused
-  HITL runs. Schedule via cron/managed-PG snapshots; test restores
-  quarterly.
+  HITL runs.
+- **Postgres, automated**: `scripts/backup_db.sh`, or the Helm chart's
+  `backup-cronjob.yaml` (`Values.backup.enabled`, disabled by default).
+  Both read a **separate** `BACKUP_DATABASE_URL` — never `DATABASE_URL`,
+  the app's own read/write credential. This is a hard requirement, not a
+  convenience: an agent run with valid, approved credentials can delete
+  production data, and a backup plane that trusts the same credential as
+  the app it's protecting is not a real recovery plane. Provision the
+  backup role with **`SELECT` only** — no `INSERT`/`UPDATE`/`DELETE`/`DROP`
+  on the app's tables:
+  ```sql
+  CREATE ROLE backup_ro LOGIN PASSWORD '...';
+  GRANT CONNECT ON DATABASE it_automator TO backup_ro;
+  GRANT USAGE ON SCHEMA public TO backup_ro;
+  GRANT SELECT ON ALL TABLES IN SCHEMA public TO backup_ro;
+  ```
+  For Kubernetes, the CronJob's `BACKUP_DATABASE_URL` lives in a
+  **different** `Secret` (`Values.backup.existingSecret`) than the app's
+  own `existingSecret`, provisioned/rotated independently — see
+  `values.yaml`'s `backup` block.
 - **SQLite (dev)**: copy `data/*.db` while the app is stopped.
+- **Restore drills**: `scripts/validate_backup_restore.sh` proves a
+  produced dump is genuinely restorable — creates a scratch read-only
+  role, runs `backup_db.sh` as that role (confirming it truly can't
+  write), restores into a fresh database, and checks the Alembic revision
+  and a canary row match the source. Run it quarterly, and any time the
+  schema or the backup role's grants change. "A file exists in the backup
+  bucket" is not the same claim as "we can recover from it" — this script
+  is what actually proves the second one.
+
+## Audit log integrity
+
+`AuditLog` rows are hash-chained (`app/db/audit.py`) — every row's
+`entry_hash` covers the previous row's hash plus its own fields, and a
+singleton `audit_chain_head` row tracks the chain's current tip. This is
+**tamper-evident, not tamper-proof**: it detects a row edited or deleted
+after the fact by anyone who doesn't also recompute every later hash to
+match, but a DB-admin-level actor rewriting the whole chain forward from a
+tampering point *and* recomputing consistent hashes would not be caught by
+this alone. Treat it as one layer, not the whole story — the recommended
+defense in depth (not yet built) is streaming `AuditLog` rows to an
+external SIEM/append-only log as they're written, so a compromised DB
+credential can't also erase the evidence of its own use.
+
+- **Check integrity on demand**: `GET /audit/verify` (ADMIN API client
+  only) walks the full chain and returns `{"ok": bool, "detail": str}`. A
+  `false` result is itself logged as an `audit_chain_verification_failed`
+  security event.
+- **If it reports tampering**: treat it as a real incident, not a bug
+  report — identify which row/range failed (the `detail` message names the
+  first mismatched row, or reports the chain head disagreeing with the
+  last row, which means trailing rows were deleted), pull `GET
+  /audit/export` for the surrounding time range from a point BEFORE the
+  reported row, and cross-reference against `GET /audit/export`'s own
+  security events (`audit_log_exported`) and any external SIEM feed if one
+  is configured, to establish who had DB access in that window.
+- **Rows from before this existed** have `entry_hash IS NULL` and are
+  skipped by verification (not flagged as tampered) — this is expected for
+  any database that existed before the `audit hash chain` migration
+  landed, not a sign of a gap.
+- Recommended cadence: run `GET /audit/verify` as part of the same
+  quarterly restore-drill routine below, not just reactively.
 
 ## Data retention
 
@@ -111,6 +179,27 @@ Look at the failed ticket's audit trail: repeated replans indicate the
 planner is looping on a contradiction (that's the budget doing its job);
 a single plan blowing the budget means the budget is undersized for
 current prompts — raise it deliberately.
+
+### OrgTokenBudgetNearCap
+> Org-wide daily LLM spend past 80% of MAX_ORG_TOKENS_PER_DAY.
+
+Check `org_tokens_used_today` on the Grafana dashboard against
+`org_token_budget_limit`. Not itself an incident — a heads-up before
+`ClientTokenBudgetExceeded` starts firing and legitimate tickets get
+rejected. Either raise `MAX_ORG_TOKENS_PER_DAY` if the spend is expected
+(traffic growth), or check for one client running away with disproportionate
+usage (`GET /audit/export` filtered to the suspect client's tickets).
+
+### ClientTokenBudgetExceeded
+> A ticket was rejected/aborted on a per-client or org-wide daily token cap.
+
+Expected behavior under sustained load near the configured cap, not
+necessarily a bug. If it's firing for a single legitimate client
+repeatedly, either raise `MAX_TOKENS_PER_CLIENT_PER_DAY` for that
+deployment or investigate why that client's tickets are consuming more
+tokens than expected (a replanning loop shows up here too, same as
+`TokenBudgetAborts` above, just attributed at the client level instead of
+per-ticket).
 
 ### ApiDown
 > /metrics unscrapable 2m.
