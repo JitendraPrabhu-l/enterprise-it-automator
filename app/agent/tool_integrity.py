@@ -39,15 +39,53 @@ class ToolIntegrityError(RuntimeError):
     Settings.tool_integrity_strict is enabled."""
 
 
+def _canonicalize_property(prop: dict[str, Any]) -> dict[str, Any]:
+    """Extracts just the TYPE information from one JSON-schema property,
+    dropping pydantic-generated ornamentation (title, default, and exact
+    anyOf branch order/shape) that legitimately reformats across
+    pydantic-core/Python versions without the tool's actual argument
+    contract changing at all — e.g. a `str | None` parameter's `anyOf`
+    branch order, or whether a `title` like "Full Name" is auto-derived
+    from the field name, are pydantic-core implementation details, not
+    something a tool-poisoning attacker controls or a reviewer would ever
+    diff. Hashing that noise verbatim (an earlier version of this function
+    did) produces false-positive drift between environments with
+    different-but-compatible pydantic versions — confirmed live: a
+    contributor's local baseline regeneration disagreed with CI's despite
+    both running the exact same tool-registration code, traced to exactly
+    this. Only `name`, `description`, property NAMES, per-property TYPE,
+    and the REQUIRED set are what this check should actually be
+    sensitive to.
+    """
+    if "anyOf" in prop:
+        return {"anyOf": sorted({branch.get("type", "?") for branch in prop["anyOf"]})}
+    return {"type": prop.get("type", "?")}
+
+
+def _canonical_schema(input_schema: dict[str, Any]) -> dict[str, Any]:
+    properties = input_schema.get("properties") or {}
+    return {
+        "properties": {name: _canonicalize_property(prop) for name, prop in properties.items()},
+        "required": sorted(input_schema.get("required") or []),
+    }
+
+
 def hash_tool(name: str, description: str | None, input_schema: dict[str, Any] | None) -> str:
     """Stable hash over the parts of a tool definition that matter to the
     planner: what it's called, what it claims to do, and what arguments it
-    accepts. json.dumps(sort_keys=True) makes this independent of dict
-    insertion order (the mcp SDK doesn't guarantee one) so re-hashing the
-    same effective tool definition always reproduces the same hash.
+    accepts (via _canonical_schema — see that function's docstring for why
+    the raw pydantic-generated input_schema isn't hashed verbatim).
+    json.dumps(sort_keys=True) makes this independent of dict insertion
+    order (neither the mcp SDK nor _canonical_schema's dict comprehension
+    guarantees one) so re-hashing the same effective tool definition
+    always reproduces the same hash.
     """
     payload = json.dumps(
-        {"name": name, "description": description or "", "input_schema": input_schema or {}},
+        {
+            "name": name,
+            "description": description or "",
+            "input_schema": _canonical_schema(input_schema or {}),
+        },
         sort_keys=True,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

@@ -49,7 +49,13 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Scan image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        # aquasecurity/trivy-action switched its tag scheme from bare
+        # version numbers (0.28.0) to v-prefixed ones (v0.28.0+) upstream —
+        # the old bare tag stopped resolving ("Unable to resolve action"),
+        # breaking this workflow with no code-level cause. Pinned to a
+        # current v-prefixed release; image-ref/format/severity/
+        # ignore-unfixed/exit-code below are all still valid inputs on it.
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ghcr.io/${{ steps.image.outputs.name }}:scan-candidate
           format: table

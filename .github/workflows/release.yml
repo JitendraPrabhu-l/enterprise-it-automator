@@ -53,7 +53,9 @@ jobs:
           cache-from: type=gha
 
       - name: Scan image (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        # See deploy.yml's matching comment: aquasecurity/trivy-action
+        # moved to v-prefixed tags upstream, breaking the old bare-number pin.
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ghcr.io/${{ steps.meta.outputs.name }}:scan-candidate
           format: table

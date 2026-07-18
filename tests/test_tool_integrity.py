@@ -94,9 +94,58 @@ def test_missing_baseline_file_flags_every_tool_as_untrusted(baseline_file):
 
 
 def test_hash_tool_is_order_independent_over_schema_keys():
-    schema_a = {"properties": {"a": 1, "b": 2}, "required": ["a"]}
-    schema_b = {"required": ["a"], "properties": {"b": 2, "a": 1}}
+    schema_a = {
+        "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
+        "required": ["a"],
+    }
+    schema_b = {
+        "required": ["a"],
+        "properties": {"b": {"type": "integer"}, "a": {"type": "string"}},
+    }
     assert tool_integrity.hash_tool("x", "desc", schema_a) == tool_integrity.hash_tool("x", "desc", schema_b)
+
+
+def test_hash_tool_ignores_pydantic_generated_ornamentation():
+    """Regression test: an earlier version of hash_tool() hashed the raw
+    pydantic-generated input_schema verbatim, including `title` (auto-
+    derived from the field name) and exact `anyOf`/`default` shape — both
+    of which legitimately vary across pydantic-core/Python versions
+    without the tool's actual argument contract changing. That produced
+    real false-positive drift between a local dev environment and CI on
+    the exact same code. Two schemas differing only in that ornamentation
+    (title text, default value, anyOf branch order) must hash identically.
+    """
+    schema_with_title = {
+        "properties": {
+            "username": {"title": "Username", "type": "string"},
+            "ticket_id": {
+                "title": "Ticket Id", "default": None,
+                "anyOf": [{"type": "integer"}, {"type": "null"}],
+            },
+        },
+        "required": ["username"],
+        "title": "create_userArguments",
+        "type": "object",
+    }
+    schema_without_title = {
+        "properties": {
+            "username": {"type": "string"},
+            "ticket_id": {"anyOf": [{"type": "null"}, {"type": "integer"}]},  # reversed branch order
+        },
+        "required": ["username"],
+    }
+    assert tool_integrity.hash_tool("t", "d", schema_with_title) == tool_integrity.hash_tool(
+        "t", "d", schema_without_title
+    )
+
+
+def test_hash_tool_still_detects_a_real_argument_contract_change():
+    base = {"properties": {"username": {"type": "string"}}, "required": ["username"]}
+    added_required_arg = {
+        "properties": {"username": {"type": "string"}, "force": {"type": "boolean"}},
+        "required": ["username", "force"],
+    }
+    assert tool_integrity.hash_tool("t", "d", base) != tool_integrity.hash_tool("t", "d", added_required_arg)
 
 
 # --- discover_tool_reference() integration: strict vs. log-only modes ------
