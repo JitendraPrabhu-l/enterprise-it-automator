@@ -78,6 +78,10 @@ class EmployeeUser(Base):
     # used by app/agent/demo_purge.py to hard-delete these rows alongside
     # the demo client's tickets/approvals/audit entries.
     owned_by_client_id: Mapped[int | None] = mapped_column(ForeignKey("api_clients.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class AppAccessStatus(str, enum.Enum):
