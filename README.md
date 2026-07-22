@@ -44,6 +44,7 @@ Prefer containers? `docker compose up --build` — see **[Running with Docker](#
 - [MCP transport: local vs. remote](#mcp-transport-local-vs-remote)
 - [Example flow](#example-flow)
 - [Live streaming via AG-UI](#live-streaming-via-ag-ui)
+- [Voice-to-ticket (speech-to-text)](#voice-to-ticket-speech-to-text)
 - [Running with Docker](#running-with-docker)
 - [Observability](#observability)
 - [Secrets management](#secrets-management)
@@ -467,6 +468,42 @@ agent's LLM calls aren't token-streamed — each `ainvoke()` returns whole)
 and `STATE_SNAPSHOT` (only incremental `STATE_DELTA` is emitted, since every
 run starts from a fresh empty client-side state document rather than
 resuming a previously-synced one across page reloads).
+
+## Voice-to-ticket (speech-to-text)
+
+The dashboard's 🎙️ **Dictate** button (next to the ticket Body field)
+records via the browser's `MediaRecorder` API and uploads the clip to
+`POST /tickets/transcribe`, which transcribes it via Groq's Whisper
+endpoint (`app/agent/transcription.py`, using the `groq` SDK directly —
+already a dependency for `LLM_PROVIDER=groq`, no new package). The
+returned text is inserted into the Body field; **this never submits a
+ticket by itself** — the existing Submit button still does that, from the
+same textarea, so a voice-dictated ticket goes through the exact same
+prompt-injection framing/validation as a typed one (see **MCP discovery,
+PII masking & prompt-injection guardrails** below), with no separate,
+less-guarded path into the planner.
+
+Requires `GROQ_API_KEY` to be set (used directly for Whisper, regardless
+of the configured `LLM_PROVIDER` — a deployment on `anthropic`/`watsonx`/
+`openrouter` with no Groq key configured gets a clear 503, not a
+confusing failure). Shares `POST /tickets`' daily-request-cap and
+org-token-budget checks (transcription costs real Groq API spend per
+call, same abuse surface a caller could otherwise route around). Files
+over 25MB (Groq/OpenAI's own Whisper upload limit) are rejected locally
+with a 413 rather than failing after a full upload.
+
+**Known limitation, confirmed via a live end-to-end test (not just
+documentation):** `firstinitial+lastname`-style usernames (e.g. `jsmith`)
+spoken aloud sound like two separate words to Whisper ("Jay Smith"), not
+one contiguous token — a real speech-recognition boundary, not a bug in
+this pipeline. Whisper reasonably transcribes just the surname, the
+planner then correctly finds no employee matching that surname alone, and
+safely declines to act (empty plan, no hallucinated target) rather than
+guessing — the same guardrail that protects any typed ticket with an
+unrecognized name. Spelling out the username phonetically ("j, s, m, i,
+t, h") or including it in writing elsewhere in the ticket produces
+reliable results; this is a known trade-off of voice input for this
+username convention, not something to "fix" in code.
 
 ## Running with Docker
 
