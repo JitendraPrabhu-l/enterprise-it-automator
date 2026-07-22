@@ -97,7 +97,17 @@ class Settings(BaseSettings):
     # for the wrong (real) employee with nobody in the loop to catch it.
     # enable_user (re-activating a previously offboarded account) carries
     # the same risk as disable_user and is gated the same way.
-    sensitive_actions: str = "disable_user,enable_user,revoke_access,create_user,grant_access"
+    # grant_app_access/revoke_app_access (app/mcp_server/app_access_server.py)
+    # carry the identical risk profile as their generic grant_access/
+    # revoke_access counterparts — provisioning/removing a real named SaaS
+    # app (Slack, Jira, email, ...) for the wrong employee is exactly as
+    # consequential as the generic-resource case, so both are gated here
+    # from day one rather than repeating the "ship ungated, add gating
+    # after a review finds the gap" path grant_access/create_user took.
+    sensitive_actions: str = (
+        "disable_user,enable_user,revoke_access,create_user,grant_access,"
+        "grant_app_access,revoke_app_access"
+    )
 
     api_host: str = "0.0.0.0"
     api_port: int = 8000

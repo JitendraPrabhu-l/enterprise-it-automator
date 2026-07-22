@@ -8,13 +8,13 @@ from app.mcp_server.registry import (
 )
 
 
-def test_registry_has_all_three_domains():
+def test_registry_has_all_four_domains():
     registry = get_registry()
-    assert set(registry.keys()) == {"identity", "access", "ticketing"}
+    assert set(registry.keys()) == {"identity", "access", "app_access", "ticketing"}
 
 
 def test_registry_all_domains_currently_point_at_same_gateway():
-    """All three domains resolve to the same location today, since they're
+    """All four domains resolve to the same location today, since they're
     all composed onto one gateway process — this is expected, not a bug;
     the registry indirection exists for a FUTURE split, not a current one."""
     registry = get_registry()
@@ -30,6 +30,17 @@ def test_resolve_domain_for_tool_identity():
 def test_resolve_domain_for_tool_access():
     assert resolve_domain_for_tool("access_grant_access") == "access"
     assert resolve_domain_for_tool("access_revoke_access") == "access"
+
+
+def test_resolve_domain_for_tool_app_access():
+    """app_access_* must resolve to "app_access", NOT be misdetected as
+    "access" (the two domain names share a substring) — the real risk
+    this app_access addition introduced to resolve_domain_for_tool's
+    prefix-matching, worth pinning explicitly rather than trusting that
+    startswith("access_") vs startswith("app_access_") never collides."""
+    assert resolve_domain_for_tool("app_access_grant_app_access") == "app_access"
+    assert resolve_domain_for_tool("app_access_revoke_app_access") == "app_access"
+    assert resolve_domain_for_tool("app_access_list_app_access") == "app_access"
 
 
 def test_resolve_domain_for_tool_ticketing():

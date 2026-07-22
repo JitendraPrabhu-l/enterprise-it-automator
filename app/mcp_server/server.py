@@ -48,6 +48,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.config import get_settings
 from app.db.session import init_db
 from app.mcp_server.access_server import access_mcp
+from app.mcp_server.app_access_server import app_access_mcp
 from app.mcp_server.identity_server import identity_mcp
 from app.mcp_server.prompts import register_prompts
 from app.mcp_server.rate_limit import check_rate_limit
@@ -89,6 +90,7 @@ register_prompts(mcp)
 _DOMAIN_SERVERS = {
     "identity": identity_mcp,
     "access": access_mcp,
+    "app_access": app_access_mcp,
     "ticketing": ticketing_mcp,
 }
 

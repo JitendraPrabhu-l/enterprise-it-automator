@@ -71,12 +71,13 @@ Prefer containers? `docker compose up --build` — see **[Running with Docker](#
 ```
 
 - **`app/mcp_server/`** — a real MCP server (built on the official `mcp` Python SDK)
-  composing three domain servers (identity, access, ticketing) behind one
-  gateway, each tool exposed under a domain-prefixed name
+  composing four domain servers (identity, access, app_access, ticketing)
+  behind one gateway, each tool exposed under a domain-prefixed name
   (`identity_get_user`, `identity_create_user`, `identity_disable_user`,
   `identity_enable_user`, `access_grant_access`, `access_revoke_access`,
-  `ticketing_add_ticket_comment`, `ticketing_get_ticket_status`) over JSON-RPC,
-  on either of two transports
+  `app_access_grant_app_access`, `app_access_revoke_app_access`,
+  `app_access_list_app_access`, `ticketing_add_ticket_comment`,
+  `ticketing_get_ticket_status`) over JSON-RPC, on either of two transports
   (see **MCP transport: local vs. remote** below). `identity_create_user` auto-grants
   a default access bundle based on the employee's `department`
   (`DEPARTMENT_ACCESS_DEFAULTS` in `tools.py` — e.g. Engineering gets
@@ -85,13 +86,29 @@ Prefer containers? `docker compose up --build` — see **[Running with Docker](#
   don't need to spell out every resource. `identity_enable_user` re-activates
   a previously offboarded employee (re-onboarding) — added after a live bug
   where the planner hallucinated a nonexistent tool for exactly this case.
-  Sensitive tools
-  (`identity_disable_user`, `identity_enable_user`, `access_revoke_access`) require a server-verified `approval_id` —
+  **`app_access_*`** is a real per-named-SaaS-app access domain (Jira,
+  Slack, Salesforce, GitHub, Workday, NetSuite, email —
+  `APP_CATALOG` in `tools.py`), distinct from `access_grant_access`'s
+  free-text resource strings: each grant is a real row
+  (`AppAccessGrant`) with its own granted/revoked timestamps and audit
+  trail, so "does this employee currently have Slack" is a real query,
+  not a string-match against a flat list. Deliberately on-demand only —
+  `identity_create_user` does NOT auto-grant named apps, so onboarding
+  stays a single approval; a ticket that also asks for named-app access
+  gets a separate, individually-approved `app_access_grant_app_access`
+  step. Sensitive tools
+  (`identity_disable_user`, `identity_enable_user`, `access_revoke_access`,
+  `app_access_revoke_app_access`) require a server-verified `approval_id` —
   the server itself refuses the call if no human has approved that *exact*
   tool + arguments combination (`approval_gate.py`). This is a real security
   boundary, not a prompt-level suggestion the LLM could talk its way past, and
   it is enforced identically regardless of which transport the client used to
-  reach the server.
+  reach the server. (`identity_create_user`/`access_grant_access`/
+  `app_access_grant_app_access` are ALSO in `SENSITIVE_ACTIONS` — the graph
+  still pauses for human approval before calling them — but only the
+  revoke/disable half of each pair additionally enforces that approval
+  server-side via `require_approval`; see `app_access_server.py`'s
+  `grant_app_access` docstring for why.)
 - **`app/agent/`** — a [LangGraph](https://langchain-ai.github.io/langgraph/) DAG:
   `plan → route → execute_step → route → ... → finalize`, with a dedicated
   `await_approval` node that uses LangGraph's `interrupt()` to pause the whole

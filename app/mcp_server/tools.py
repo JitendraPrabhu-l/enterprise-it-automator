@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db.audit import append_audit_log
-from app.db.models import EmployeeUser, Ticket, UserStatus
+from app.db.models import AppAccessGrant, AppAccessStatus, EmployeeUser, Ticket, UserStatus, utcnow
 
 
 class ToolError(Exception):
@@ -25,12 +25,25 @@ DEPARTMENT_ACCESS_DEFAULTS: dict[str, list[str]] = {
     "executive": ["vpn", "admin-panel", "netsuite", "workday"],
 }
 
+# Fixed catalog of named SaaS apps the app_access domain (grant_app_access/
+# revoke_app_access/list_app_access below) will accept — distinct from the
+# free-text `resource` strings the generic grant_access/revoke_access above
+# take, and from DEPARTMENT_ACCESS_DEFAULTS' own resource-string shorthand
+# (e.g. "github:engineering") which this catalog does NOT replace; the two
+# systems coexist (see app/db/models.py's AppAccessGrant docstring for why).
+# A plain code-level set, not a DB-level enum/FK table, so adding a new app
+# is a one-line change here, no migration — same "hand-configured set,
+# validated in code" pattern as SENSITIVE_ACTIONS/TOOLS_ACCEPTING_TICKET_ID.
+APP_CATALOG: frozenset[str] = frozenset({
+    "jira", "slack", "salesforce", "github", "workday", "netsuite", "email",
+})
+
 # Domain prefixes the gateway (server.py) namespaces every tool name with —
 # is_sensitive() strips these before checking against SENSITIVE_ACTIONS so
 # the env var stays configured with bare action names regardless of
 # namespacing, and approval_gate checks work against whichever form a
 # caller uses.
-_DOMAIN_PREFIXES = ("identity_", "access_", "ticketing_")
+_DOMAIN_PREFIXES = ("identity_", "access_", "ticketing_", "app_access_")
 
 
 def strip_domain_prefix(tool_name: str) -> str:
@@ -67,6 +80,7 @@ def strip_domain_prefix(tool_name: str) -> str:
 # hand-configured rather than introspected.
 TOOLS_ACCEPTING_TICKET_ID = {
     "create_user", "disable_user", "enable_user", "grant_access", "revoke_access",
+    "grant_app_access", "revoke_app_access",
     "add_ticket_comment", "get_ticket_status",
 }
 
@@ -338,6 +352,109 @@ async def revoke_access(
         f"revoked {resource} from {username}", True, ticket_id,
     )
     return {"username": user.username, "access_grants": user.access_grants}
+
+
+async def list_app_access(session: AsyncSession, username: str) -> dict:
+    """Read-only: every named SaaS app this employee currently has ACTIVE
+    access to. Not sensitive — same readOnlyHint=True rationale as get_user.
+    """
+    await _get_user(session, username)  # 404s cleanly if the employee doesn't exist
+    rows = await session.scalars(
+        select(AppAccessGrant).where(
+            AppAccessGrant.username == username,
+            AppAccessGrant.status == AppAccessStatus.ACTIVE,
+        )
+    )
+    return {"username": username, "apps": sorted(r.app_name for r in rows)}
+
+
+async def grant_app_access(
+    session: AsyncSession,
+    username: str,
+    app_name: str,
+    actor: str = "agent",
+    ticket_id: int | None = None,
+) -> dict:
+    """Not destructive, but IS in SENSITIVE_ACTIONS by default (same as
+    generic grant_access) — the graph pauses for human approval before
+    this is ever called; this tool itself doesn't ALSO call
+    require_approval server-side, matching generic grant_access's own
+    precedent (only the revoke half of each grant/revoke pair gets that
+    second, MCP-transport-level check in this codebase today).
+
+    Idempotent by ACTUAL STATE, not just by not-erroring: a
+    second grant call while an ACTIVE row already exists for this
+    (username, app_name) pair returns that existing grant rather than
+    inserting a duplicate row — same spirit as generic grant_access's
+    "if resource not in access_grants" dedup check, adapted to a
+    row-per-event table where "already granted" means "an ACTIVE row
+    exists," not "no ACTIVE row and no REVOKED row either."
+    """
+    if app_name not in APP_CATALOG:
+        raise ToolError(
+            f"Unknown app {app_name!r} — must be one of {sorted(APP_CATALOG)}. "
+            "Use the generic grant_access tool for other resources."
+        )
+    user = await _get_user(session, username)
+    existing = await session.scalar(
+        select(AppAccessGrant).where(
+            AppAccessGrant.username == username,
+            AppAccessGrant.app_name == app_name,
+            AppAccessGrant.status == AppAccessStatus.ACTIVE,
+        )
+    )
+    if existing is None:
+        session.add(
+            AppAccessGrant(
+                username=username, app_name=app_name,
+                status=AppAccessStatus.ACTIVE, granted_by_ticket_id=ticket_id,
+            )
+        )
+    await _audit(
+        session, actor, "grant_app_access", {"username": username, "app_name": app_name},
+        f"granted {app_name} access to {username}", True, ticket_id,
+    )
+    return {"username": user.username, "app_name": app_name, "status": "active"}
+
+
+async def revoke_app_access(
+    session: AsyncSession,
+    username: str,
+    app_name: str,
+    actor: str = "agent",
+    ticket_id: int | None = None,
+) -> dict:
+    """Sensitive action — must only be invoked after HITL approval. Same
+    shape as generic revoke_access: reject cleanly (audited, not a crash)
+    if the employee has no ACTIVE grant for this app to revoke.
+    """
+    if app_name not in APP_CATALOG:
+        raise ToolError(f"Unknown app {app_name!r} — must be one of {sorted(APP_CATALOG)}.")
+    user = await _get_user_or_audit_rejection(
+        session, username, actor=actor, tool_name="revoke_app_access",
+        tool_args={"username": username, "app_name": app_name}, ticket_id=ticket_id,
+    )
+    grant = await session.scalar(
+        select(AppAccessGrant).where(
+            AppAccessGrant.username == username,
+            AppAccessGrant.app_name == app_name,
+            AppAccessGrant.status == AppAccessStatus.ACTIVE,
+        )
+    )
+    if grant is None:
+        await _audit(
+            session, actor, "revoke_app_access", {"username": username, "app_name": app_name},
+            f"rejected: {username} does not have active {app_name} access", False, ticket_id,
+            commit_immediately=True,
+        )
+        raise ToolError(f"User {username!r} does not have active {app_name!r} access")
+    grant.status = AppAccessStatus.REVOKED
+    grant.revoked_at = utcnow()
+    await _audit(
+        session, actor, "revoke_app_access", {"username": username, "app_name": app_name},
+        f"revoked {app_name} access from {username}", True, ticket_id,
+    )
+    return {"username": user.username, "app_name": app_name, "status": "revoked"}
 
 
 async def add_ticket_comment(session: AsyncSession, ticket_id: int, comment: str) -> dict:

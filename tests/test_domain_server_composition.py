@@ -1,11 +1,11 @@
 """Tests for the gateway server's domain-server composition (Stage 2.1).
 
-The gateway composes three independently-defined FastMCP domain servers
-(identity, access, ticketing) onto one process via add_tool() namespacing —
-verifies the composition itself produces the right tool set with the right
-names, independent of any real tool-call behavior (covered by
-test_mcp_transport.py's real-subprocess tests and test_tools.py's direct
-tool tests).
+The gateway composes four independently-defined FastMCP domain servers
+(identity, access, app_access, ticketing) onto one process via add_tool()
+namespacing — verifies the composition itself produces the right tool set
+with the right names, independent of any real tool-call behavior (covered
+by test_mcp_transport.py's real-subprocess tests and test_tools.py's
+direct tool tests).
 """
 
 from app.mcp_server.server import _bootstrap, mcp
@@ -29,6 +29,9 @@ async def test_gateway_exposes_all_domain_tools_namespaced(monkeypatch):
     assert "identity_disable_user" in tool_names
     assert "access_grant_access" in tool_names
     assert "access_revoke_access" in tool_names
+    assert "app_access_grant_app_access" in tool_names
+    assert "app_access_revoke_app_access" in tool_names
+    assert "app_access_list_app_access" in tool_names
     assert "ticketing_add_ticket_comment" in tool_names
     assert "ticketing_get_ticket_status" in tool_names
     assert "is_sensitive_action" in tool_names
@@ -39,11 +42,14 @@ async def test_gateway_exposes_all_domain_tools_namespaced(monkeypatch):
     assert "disable_user" not in tool_names
     assert "grant_access" not in tool_names
     assert "revoke_access" not in tool_names
+    assert "grant_app_access" not in tool_names
+    assert "revoke_app_access" not in tool_names
 
 
-async def test_gateway_exposes_exactly_9_tools(monkeypatch):
+async def test_gateway_exposes_exactly_12_tools(monkeypatch):
     """4 identity (get_user/create_user/disable_user/enable_user) + 2 access
-    + 2 ticketing + 1 is_sensitive_action = 9. A regression here means a
+    + 3 app_access (grant_app_access/revoke_app_access/list_app_access)
+    + 2 ticketing + 1 is_sensitive_action = 12. A regression here means a
     domain server's tool count changed without updating this expectation,
     or composition silently dropped/duplicated a tool.
 
@@ -62,7 +68,7 @@ async def test_gateway_exposes_exactly_9_tools(monkeypatch):
 
     await _bootstrap()
     tools = await mcp.list_tools()
-    assert len(tools) == 9
+    assert len(tools) == 12
 
 
 async def test_gateway_tools_preserve_original_descriptions(monkeypatch):
@@ -121,3 +127,14 @@ async def test_gateway_tools_preserve_annotations(monkeypatch):
 
     meta_tool = by_name["is_sensitive_action"].annotations
     assert meta_tool.readOnlyHint is True
+
+    app_access_read = by_name["app_access_list_app_access"].annotations
+    assert app_access_read.readOnlyHint is True
+
+    app_access_grant = by_name["app_access_grant_app_access"].annotations
+    assert app_access_grant.destructiveHint is False
+    assert app_access_grant.idempotentHint is True
+
+    app_access_revoke = by_name["app_access_revoke_app_access"].annotations
+    assert app_access_revoke.destructiveHint is True
+    assert app_access_revoke.idempotentHint is False

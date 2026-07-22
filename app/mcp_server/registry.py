@@ -37,6 +37,7 @@ def get_registry() -> dict[str, ServerLocation]:
     return {
         "identity": gateway,
         "access": gateway,
+        "app_access": gateway,
         "ticketing": gateway,
     }
 

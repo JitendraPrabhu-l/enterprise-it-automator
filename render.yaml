@@ -80,7 +80,7 @@ services:
       - key: GROQ_MODEL
         value: llama-3.3-70b-versatile
       - key: SENSITIVE_ACTIONS
-        value: disable_user,enable_user,revoke_access,create_user,grant_access
+        value: disable_user,enable_user,revoke_access,create_user,grant_access,grant_app_access,revoke_app_access
       - key: APPROVAL_SLA_MINUTES
         value: "60"
       - key: SLA_SWEEP_INTERVAL_SECONDS
