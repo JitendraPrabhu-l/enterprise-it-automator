@@ -1,0 +1,17 @@
+# Trivy secret-scanner false positive, reviewed and confirmed safe —
+# verified against the actual matched source line, not just inferred.
+#
+# gcp-service-account (regex target: "type": "service_account") fires on
+# .venv/.../ibm_watsonx_ai/connections.py:286, inside third-party SDK
+# source (ibm-watsonx-ai, a real dependency for LLM_PROVIDER=watsonx),
+# bundled unmodified from PyPI. The flagged block is a DOCSTRING CODE
+# EXAMPLE for Google BigQuery connections, explicitly labeled by IBM's own
+# comment right above it: "The example below is only indicative to show
+# the fields." Every value in the dict is a self-referential placeholder
+# ("project_id": "project_id", "private_key": "private key contents") —
+# documentation illustrating a JSON shape, not real secret material.
+#
+# Scoped to the specific rule ID only (not a broader vulnerability/CVE
+# suppression) — a real secret finding under any OTHER rule ID still
+# fails the build.
+gcp-service-account
