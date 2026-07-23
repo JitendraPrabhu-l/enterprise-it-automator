@@ -59,6 +59,11 @@ jobs:
         with:
           image-ref: ghcr.io/${{ steps.meta.outputs.name }}:scan-candidate
           format: table
+          # See .trivyignore's own comment and deploy.yml's matching
+          # trivyignores input for why: a confirmed secret-scanner false
+          # positive in third-party ibm-watsonx-ai source, not a real
+          # credential.
+          trivyignores: .trivyignore
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
