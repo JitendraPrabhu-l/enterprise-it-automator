@@ -1,14 +1,22 @@
 name: Adversarial red-team eval
 
-# Runs evals/run_adversarial.py (the live-model prompt-injection fuzz
-# corpus, evals/adversarial.py) against the real configured model — NOT on
-# every PR like ci.yml's recorded-replay golden tickets, for the same
-# reason evals/run_live.py isn't either: it costs real API spend, is
-# non-deterministic, and needs a live provider key. workflow_dispatch for
-# an on-demand run (e.g. before a model/prompt change ships — see
-# docs/RUNBOOKS.md's "Before changing models/prompts/providers" section),
-# plus a weekly schedule so prompt/model drift on the defenses this
-# actually tests gets caught without a human having to remember to run it.
+# Runs two live-model eval scripts, neither of which belongs in ci.yml's
+# blocking recorded-replay suite (same reasoning evals/run_live.py isn't
+# there either: real API spend, non-deterministic, needs a live provider
+# key):
+#   - evals/run_adversarial.py — the prompt-injection fuzz corpus
+#     (evals/adversarial.py): a case fails only if a forbidden tool
+#     appears in the plan.
+#   - evals/run_reasoning_quality.py — a DeepEval GEval-based judge
+#     scoring whether each golden ticket's planner `reasoning` field is a
+#     genuine, specific justification (not a hallucinated-sounding
+#     non-sequitur) — a graded signal evals/golden.py's exact-match
+#     scoring structurally cannot provide.
+# workflow_dispatch for an on-demand run (e.g. before a model/prompt
+# change ships — see docs/RUNBOOKS.md's "Before changing
+# models/prompts/providers" section), plus a weekly schedule so
+# prompt/model drift on what these actually test gets caught without a
+# human having to remember to run it.
 on:
   workflow_dispatch: {}
   schedule:
@@ -32,3 +40,15 @@ jobs:
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python -m evals.run_adversarial
+
+      - name: Run DeepEval reasoning-quality eval against the live model
+        # A second, independent (graded, not exact-match) quality signal
+        # alongside evals/golden.py's mechanical scoring — see
+        # evals/run_reasoning_quality.py's module docstring. Same
+        # workflow_dispatch/weekly-schedule placement as the adversarial
+        # eval above, for the same reason (real API spend, non-
+        # deterministic, needs a live key — none of which belong in
+        # ci.yml's blocking recorded-replay suite).
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python -m evals.run_reasoning_quality
