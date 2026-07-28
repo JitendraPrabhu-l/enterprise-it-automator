@@ -34,6 +34,7 @@ def main() -> int:
 
     from app.agent.llm import get_llm
     from app.db.session import init_db
+    from evals.report import CaseSummary, current_model_label, record_run
     from evals.runner import evaluate
 
     async def _run():
@@ -44,6 +45,22 @@ def main() -> int:
     report = asyncio.run(_run())
     for line in report.summary_lines():
         print(line)
+
+    record_run(
+        "golden_live",
+        score=report.score,
+        passed=report.passed,
+        total=report.total,
+        min_score=float(os.environ.get("EVAL_MIN_SCORE", "0.8")),
+        model=current_model_label(),
+        cases=[
+            CaseSummary(
+                name=r.name, passed=r.passed,
+                detail="; ".join(r.failures) if r.failures else f"category={r.category}",
+            )
+            for r in report.results
+        ],
+    )
 
     min_score = float(os.environ.get("EVAL_MIN_SCORE", "0.8"))
     if report.score < min_score:

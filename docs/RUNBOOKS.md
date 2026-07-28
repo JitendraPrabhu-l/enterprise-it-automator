@@ -4,7 +4,22 @@ Operational procedures, and one section per alert rule in
 [observability/alert-rules.yml](../observability/alert-rules.yml). The
 observability stack itself: `docker compose -f docker-compose.yml -f
 docker-compose.observability.yml up -d` → Grafana :3000, Prometheus :9090,
-Alertmanager :9093.
+Alertmanager :9093, Jaeger :16686.
+
+## Debugging a specific ticket run
+
+Two signals, two questions:
+
+- **"What happened inside THIS run?"** → Jaeger (`http://localhost:16686`
+  with the observability overlay up; `OTEL_EXPORTER_OTLP_ENDPOINT` points
+  there automatically). Service `enterprise-it-automator`, filter by
+  approximate time or search span tags — the span tree shows every graph
+  node, LLM call (with token usage), and MCP tool call for that ticket, in
+  order, with wall-clock duration per step. This is the first place to
+  look for "why did this ticket take so long" or "which step failed."
+- **"What's the rate/error budget across ALL runs?"** → Grafana
+  (`:3000`)/`GET /metrics` — see **Metrics, dashboards & alerts** in
+  README.md.
 
 ## Deploy / rollback
 
@@ -38,6 +53,14 @@ without touching anything the golden-ticket suite's single pinned
 injection case would catch. Default `ADVERSARIAL_MIN_SCORE=1.0`: unlike
 the golden suite's live-model tolerance for one quality miss, a
 regression here means a guardrail stopped holding, not a flaky quality dip.
+
+Every live eval run (`run_live`/`run_adversarial`/`run_reasoning_quality`)
+appends its score to `evals/history/*.jsonl`; after a batch of runs,
+`python -m evals.render_dashboard` renders `evals/history/dashboard.html`
+— a trend view of exactly the before/after numbers this section is asking
+you to look at. In CI, `red-team.yml` renders and uploads it as the
+`eval-history` workflow artifact on every scheduled/manual run — download
+it from the run's Summary page rather than re-deriving scores from raw logs.
 
 Worked example (2026-07-13, the run that set the current model pin):
 `llama-3.1-8b-instant` scored **3/6** — hallucinated a cross-domain tool

@@ -152,6 +152,21 @@ def main() -> int:
     min_score = float(os.environ.get("REASONING_MIN_SCORE", "0.7"))
     print(f"\nmean score: {mean_score:.2f} (required: {min_score:.2f})")
 
+    from evals.report import CaseSummary, current_model_label, record_run
+
+    record_run(
+        "reasoning_quality",
+        score=mean_score,
+        passed=sum(1 for r in results if r.passed),
+        total=len(results),
+        min_score=min_score,
+        model=f"{current_model_label()} (judge: project-configured-llm)",
+        cases=[
+            CaseSummary(name=r.name, passed=r.passed, detail=f"score={r.score:.2f}: {r.reason[:120]}")
+            for r in results
+        ],
+    )
+
     if mean_score < min_score:
         print(f"FAIL: mean reasoning-quality score {mean_score:.2f} < required {min_score:.2f}")
         return 1

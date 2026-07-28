@@ -1,17 +1,24 @@
 # Observability add-on: Prometheus (metrics + alert rules), Alertmanager
-# (routing), Grafana (provisioned datasource + dashboard). An OVERLAY on the
-# base compose file, so the default `docker compose up` stays exactly as it
-# was — opt in with:
+# (routing), Grafana (provisioned datasource + dashboard), and Jaeger (a
+# real trace viewer). An OVERLAY on the base compose file, so the default
+# `docker compose up` stays exactly as it was — opt in with:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
 #
 # Then: Grafana http://localhost:3000 (admin / $GRAFANA_ADMIN_PASSWORD),
-# Prometheus http://localhost:9090, Alertmanager http://localhost:9093.
+# Prometheus http://localhost:9090, Alertmanager http://localhost:9093,
+# Jaeger UI http://localhost:16686.
 #
-# Tracing note: this stack covers the METRICS signal (app/metrics.py). The
-# tracing signal (app/observability.py) exports OTLP to whatever
-# OTEL_EXPORTER_OTLP_ENDPOINT points at (Jaeger, Langfuse, a collector) and
-# is deliberately not bundled here — pick the trace backend per deployment.
+# Tracing: this overlay points the `app` service's OTEL_EXPORTER_OTLP_ENDPOINT
+# at the bundled jaeger service (below) so traces are viewable with zero
+# extra config the moment this overlay is up — submit a ticket, then open
+# the Jaeger UI, pick service "enterprise-it-automator", and see the actual
+# span tree (classify → plan → execute_step → ... → finalize, with LLM
+# token usage and MCP tool calls as child spans). Point
+# OTEL_EXPORTER_OTLP_ENDPOINT at a different OTLP-HTTP target instead (a
+# hosted Langfuse/LangSmith/collector) for a real deployment — this overlay
+# is the local/demo default, not the only supported backend (see
+# app/observability.py's module docstring).
 
 services:
   prometheus:
@@ -53,6 +60,31 @@ services:
     depends_on:
       - prometheus
     restart: unless-stopped
+
+  # All-in-one Jaeger: OTLP receiver + storage + query UI in one container —
+  # the right-sized trace backend for a local/demo stack (a real deployment
+  # would point OTEL_EXPORTER_OTLP_ENDPOINT at a hosted collector instead;
+  # see this file's header comment). In-memory storage only (no volume) —
+  # traces don't survive a container restart, which is fine for "show me
+  # what a run looks like right now," not meant as a durable trace store.
+  jaeger:
+    image: jaegertracing/all-in-one:1.68.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+    restart: unless-stopped
+
+  # Override: point THIS overlay's app service at the bundled Jaeger
+  # instead of the unset-by-default OTEL_EXPORTER_OTLP_ENDPOINT — merges
+  # with (does not replace) the base docker-compose.yml app service's own
+  # `environment`/`depends_on` maps, per Compose's override-merge semantics.
+  app:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    depends_on:
+      jaeger:
+        condition: service_started
 
 volumes:
   prometheus_data:

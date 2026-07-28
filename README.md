@@ -566,9 +566,9 @@ By default `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, so `configure_observability()
 leaves the global no-op tracer provider in place — every `start_as_current_span`
 call throughout the app is then a cheap no-op, safe to leave instrumented in
 local dev with nothing configured to receive spans. Point it at any OTLP-HTTP
-collector to start exporting — e.g. a local
-[Jaeger](https://www.jaegertracing.io/) instance, an OTel Collector forwarding
-to Langfuse/LangSmith, or a hosted OTLP endpoint:
+collector to start exporting — a hosted OTel Collector forwarding to
+Langfuse/LangSmith, a hosted OTLP endpoint, or the bundled local
+[Jaeger](https://www.jaegertracing.io/) instance below:
 
 ```
 OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318/v1/traces
@@ -577,6 +577,17 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318/v1/traces
 No vendor SDK is imported directly — instrumentation always goes through
 OTel's generic API, so swapping the exporter target is a config change, not
 a call-site rewrite.
+
+**A real trace viewer, not just instrumentation** — `docker-compose.observability.yml`
+(see below) bundles Jaeger and points the `app` service's
+`OTEL_EXPORTER_OTLP_ENDPOINT` at it automatically, so there's something to
+actually open and click into with zero extra config: submit a ticket, open
+`http://localhost:16686`, pick service `enterprise-it-automator`, and see
+the real span tree for that run — `agent.node.plan` → `agent.node.execute_step`
+→ ... → `agent.node.finalize`, with the LLM call's token-usage attributes
+and each MCP tool call as child spans. That's the difference between "I
+instrumented tracing" and "here's a trace" — most portfolio projects only
+ever show the former.
 
 ### Metrics, dashboards & alerts
 
@@ -594,11 +605,12 @@ same call sites as the tracing spans, so the two signals can't drift.
 
 A ready-made stack ships as a compose overlay — Prometheus with eight alert
 rules (each annotated with its [runbook entry](docs/RUNBOOKS.md#alerts)),
-Alertmanager, and Grafana with a provisioned overview dashboard:
+Alertmanager, Grafana with a provisioned overview dashboard, and Jaeger
+(the trace viewer mentioned above):
 
 ```bash
 GRAFANA_ADMIN_PASSWORD=... docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
-# Grafana :3000 · Prometheus :9090 · Alertmanager :9093
+# Grafana :3000 · Prometheus :9090 · Alertmanager :9093 · Jaeger :16686
 ```
 
 Cost note: `MAX_TOKENS_PER_TICKET` (default 0 = off) hard-caps LLM spend
@@ -902,6 +914,16 @@ already earned its keep twice: authoring it exposed a stale local
 `SENSITIVE_ACTIONS` that silently exempted `enable_user` from approval, and
 its first live run measured the original 8b default at 3/6 vs 5/6 for the
 70b model this repo now pins (see **Notes on model choice**).
+
+**Eval history, not just a one-off score**: every live-model eval run
+(`run_live.py`, `run_adversarial.py`, `run_reasoning_quality.py`) appends
+its result to `evals/history/*.jsonl` (`evals/report.py`) instead of just
+printing to a terminal that scrolls away. `python -m evals.render_dashboard`
+turns that into a small static HTML trend view — a stat tile + score-over-time
+line per eval, plus the full run table — and `.github/workflows/red-team.yml`
+uploads it as a workflow artifact after every scheduled/manual run, so
+"how do you know it's working" has an actual before/after answer, not just
+a claim.
 
 CI (`.github/workflows/ci.yml`) gates every push/PR to `main` on `ruff`,
 `mypy`, the full suite with a coverage floor, and a strict `pip-audit` of
