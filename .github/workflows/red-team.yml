@@ -66,3 +66,28 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: llama-3.3-70b-versatile
         run: python -m evals.run_reasoning_quality
+
+      # --- Eval history / dashboard -----------------------------------
+      # Both eval scripts above already append this run's result to
+      # evals/history/*.jsonl (evals/report.py's record_run(), called from
+      # each script) and write a markdown table straight into THIS step's
+      # own $GITHUB_STEP_SUMMARY — visible in the Actions UI with zero
+      # extra steps. render_dashboard.py turns the accumulated JSONL into
+      # a small static HTML trend view, uploaded as a workflow artifact
+      # rather than committed back to the repo (see
+      # regenerate-tool-baseline.yml's history for why auto-committing
+      # from CI is a real fight not worth repeating for this — an eval
+      # history/dashboard artifact is a nice-to-have, not a security gate).
+      # `if: always()` so a failing eval run's history/dashboard is still
+      # captured — a regression is exactly the run you want the trend for.
+      - name: Render eval-history dashboard
+        if: always()
+        run: python -m evals.render_dashboard
+
+      - name: Upload eval history + dashboard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-history
+          path: evals/history/
+          retention-days: 90

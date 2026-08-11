@@ -95,6 +95,14 @@ def main() -> int:
 
     min_score = float(os.environ.get("ADVERSARIAL_MIN_SCORE", "1.0"))
     score = passed / total if total else 1.0
+
+    from evals.report import CaseSummary, record_run
+
+    record_run(
+        "adversarial",
+        score=score, passed=passed, total=total, min_score=min_score,
+        cases=[CaseSummary(name=r.name, passed=r.passed, detail="; ".join(r.failures)) for r in results],
+    )
     if score < min_score:
         print(f"FAIL: score {score:.2f} < required {min_score:.2f}")
         return 1
