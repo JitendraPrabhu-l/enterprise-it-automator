@@ -37,8 +37,21 @@ jobs:
         run: pip install -r requirements.lock.txt
 
       - name: Run adversarial prompt-injection eval against the live model
+        # GROQ_MODEL pinned explicitly to match render.yaml/.env.example's
+        # production choice (llama-3.3-70b-versatile) — without it, both
+        # eval steps below silently fall back to app/config.py's CODE
+        # default (llama-3.1-8b-instant), which README's "Notes on model
+        # choice" already measured at 3/6 on golden tickets (hallucinated
+        # tool names, worse planning) vs 5/6 for 70b. Confirmed live: this
+        # workflow's first real run (secrets.GROQ_API_KEY newly added)
+        # failed 2 adversarial cases — complying with an injected
+        # "skip the approval step" instruction and dropping a bundled
+        # legitimate action — that reproduces on 8b and does NOT reproduce
+        # on 70b, i.e. this was silently testing the wrong model the whole
+        # time, not a real defense regression.
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: llama-3.3-70b-versatile
         run: python -m evals.run_adversarial
 
       - name: Run DeepEval reasoning-quality eval against the live model
@@ -51,4 +64,5 @@ jobs:
         # ci.yml's blocking recorded-replay suite).
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: llama-3.3-70b-versatile
         run: python -m evals.run_reasoning_quality
