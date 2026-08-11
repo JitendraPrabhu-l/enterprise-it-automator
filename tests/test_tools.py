@@ -193,7 +193,7 @@ async def test_enable_user_already_active_rejection_is_audited(session):
     assert "already active" in rows[0].result
 
 
-async def test_rejection_audit_row_survives_session_scope_rollback():
+async def test_rejection_audit_row_survives_session_scope_rollback(monkeypatch, tmp_path):
     """The actual bug caught before shipping: every one of these tools is
     invoked in production as `async with session_scope() as session: ...`
     (see identity_server.py/access_server.py), and session_scope() rolls
@@ -203,10 +203,20 @@ async def test_rejection_audit_row_survives_session_scope_rollback():
     under the raw `session` fixture above (no wrapping rollback) but
     silently vanished under the real session_scope() codepath. This test
     uses session_scope() specifically to pin that it does NOT regress.
-    """
-    import os
 
-    os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv (not os.environ.setdefault) — the latter is a no-op
+    once pydantic-settings has already populated os.environ from .env in
+    an earlier test this pytest session, which is exactly what happened
+    here: confirmed live, this test was silently running against this
+    dev machine's REAL local data/it_automator.db (DATABASE_URL from
+    .env) instead of an isolated :memory: DB, writing a genuine
+    'existing'-username row into it that persisted across runs and
+    corrupted a later run's "user doesn't exist yet" precondition.
+    monkeypatch.setenv properly overrides for this test only and reverts
+    automatically, same pattern every other DB-touching test here uses.
+    """
+    db_path = tmp_path / "rejection_audit_test.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path.as_posix()}")
     from app.config import get_settings
     from app.db import session as db_session_module
     from app.db.session import init_db, session_scope
