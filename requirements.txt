@@ -48,7 +48,7 @@ litellm>=1.94.0rc3
 # evals/golden.py's mechanical scoring. Judge model is this project's OWN
 # configured LLM (evals/deepeval_judge.py), not OpenAI's default, so this
 # adds no new API cost/credential surface.
-deepeval>=4.1.0
+deepeval>=4.1.8
 pytest>=8.3.4
 pytest-asyncio>=0.25.1
 pytest-cov>=7.0.0
